@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Watch Tracker</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-group">
+        <svg class="app-logo" viewBox="0 0 24 24" width="24" height="24">
+          <path fill="url(#gradient)" d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 18c-4.4 0-8-3.6-8-8s3.6-8 8-8 8 3.6 8 8-3.6 8-8 8zm1-13h-2v6l5.2 3.2.8-1.3-4-2.4V7z"/>
+          <defs>
+            <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#818cf8" />
+              <stop offset="100%" stop-color="#c084fc" />
+            </linearGradient>
+          </defs>
+        </svg>
+        <h1>WatchTree</h1>
+        <button id="btn-fullscreen" class="btn secondary" style="padding: 3px 8px; font-size: 10px; border-radius: 6px; margin-left: 8px; line-height: 1; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;" title="Open in Full Screen Tab">
+          <svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor">
+            <path d="M19 12h-2v3h-3v2h5v-5zM7 9h3V7H5v5h2V9zm14-6H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14z"/>
+          </svg>
+          Full Screen
+        </button>
+      </div>
+      <span class="badge">YouTube History</span>
+    </header>
+
+    <!-- Main Content -->
+    <main class="app-body">
+      <div class="column-left">
+        <!-- Heatmap Section -->
+        <section class="section heatmap-section">
+          <div class="heatmap-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <h2 class="section-title" style="margin: 0;">Annual Watch Activity</h2>
+            <div style="display: flex; gap: 6px; align-items: center;">
+              <button id="btn-toggle-calendar" class="btn secondary" style="padding: 2px 6px; font-size: 10px; border-radius: 4px; margin: 0; line-height: 1;">Hide Calendar</button>
+              <button id="btn-focus-top" class="btn secondary" style="padding: 2px 6px; font-size: 10px; border-radius: 4px; margin: 0; line-height: 1;" title="Highlight only watches of videos shown in Top Rewatched Videos list">Highlight Top</button>
+              <select id="yt-calendar-year-select" style="display: none;"></select>
+              <select id="yt-calendar-type-select" style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); color: #fff; border-radius: 6px; padding: 2px 6px; font-size: 10px; outline: none; cursor: pointer;">
+                <option value="all">All Items</option>
+                <option value="videos">Videos Only</option>
+                <option value="shorts">Shorts Only</option>
+              </select>
+            </div>
+          </div>
+          <div id="yt-calendar-years-row" style="display: flex; gap: 8px; margin: 4px 0 12px 0; align-items: center; justify-content: flex-start; flex-wrap: wrap;"></div>
+          <div class="yt-tracker-calendar-container scrollable-calendar">
+            <div id="yt-calendar-vertical-list" class="yt-calendar-vertical-list"></div>
+          </div>
+          <div class="yt-tracker-calendar-legend">
+            <span>Less</span>
+            <div class="yt-tracker-legend-bar" style="width: 80px; height: 8px; border-radius: 2px; border: 1px solid rgba(255, 255, 255, 0.08); background: linear-gradient(to right, hsla(239, 84%, 67%, 0.15) 0%, hsla(259, 84%, 61%, 0.5) 50%, hsla(280, 84%, 55%, 0.85) 100%);"></div>
+            <span>More</span>
+        </section>
+
+        <!-- Weekend vs Weekday Shift Section -->
+        <section class="section shift-section">
+          <h2 class="section-title">Weekend vs. Weekday Shift</h2>
+          <div id="shift-analysis-container">
+            <div style="text-align: center; color: var(--color-text-muted); font-size: 11px; padding: 12px 0;">Loading shift analysis...</div>
+          </div>
+        </section>
+
+        <!-- The Phase Detector Section -->
+        <section class="section phase-section">
+          <h2 class="section-title">The "Phase" Detector</h2>
+          <div class="criteria-row" style="margin-bottom: 12px; font-size: 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+            <div style="display: flex; align-items: center; gap: 4px;">
+              <span>Window:</span>
+              <input type="number" id="phase-min-days" value="30" style="width: 32px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 4px; color: #fff; font-size: 10px; text-align: center;">
+              <span>to</span>
+              <input type="number" id="phase-max-days" value="60" style="width: 32px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 4px; color: #fff; font-size: 10px; text-align: center;">
+              <span>days</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 4px;">
+              <span>Min Watches:</span>
+              <input type="number" id="phase-min-watches" value="10" style="width: 32px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 4px; color: #fff; font-size: 10px; text-align: center;">
+            </div>
+            <button id="btn-recalculate-phases" class="btn secondary" style="font-size: 9px; padding: 2px 6px; height: 20px; line-height: 1;">Scan</button>
+          </div>
+          <div id="phase-detector-container">
+            <div style="text-align: center; color: var(--color-text-muted); font-size: 11px; padding: 12px 0;">Scanning watch history for phases...</div>
+          </div>
+        </section>
+
+        <!-- Format Shift Analysis Section -->
+        <section class="section format-shift-section">
+          <h2 class="section-title">Format Shift Analysis</h2>
+          <div id="format-shift-container">
+            <div style="text-align: center; color: var(--color-text-muted); font-size: 11px; padding: 12px 0;">Analyzing attention span trend...</div>
+          </div>
+        </section>
+
+
+
+        <!-- Quick Copy Tools -->
+        <section class="section obsidian-tools">
+          <h2 class="section-title">Obsidian Daily Log Copy</h2>
+          <div class="button-row">
+            <button id="btn-copy-today" class="btn secondary flex-btn">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
+              </svg>
+              Copy Today
+            </button>
+            <button id="btn-copy-yesterday" class="btn secondary flex-btn">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
+              </svg>
+              Copy Yesterday
+            </button>
+            <button id="btn-export-markdown" class="btn danger flex-btn" title="Download entire history as Markdown">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+              </svg>
+              Export All
+            </button>
+          </div>
+          <div id="copy-status" class="toast-message hidden">Copied to clipboard!</div>
+        </section>
+
+        <!-- Takeout Import Section -->
+        <section class="section import-section">
+          <h2 class="section-title">Sync/Import YouTube History</h2>
+          <div class="button-row" style="margin-bottom: 8px;">
+            <button id="btn-trigger-sync" class="btn secondary flex-btn" style="background: rgba(99, 102, 241, 0.1); border-color: rgba(99, 102, 241, 0.2); color: #a5b4fc;" title="Automatically sync history from youtube.com/feed/history">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                <path d="M12 6v3l4-4-4-4v3c-4.42 0-8 3.58-8 8 0 1.57.46 3.03 1.24 4.26L6.7 14.8c-.45-.83-.7-1.79-.7-2.8 0-3.31 2.69-6 6-6zm6.76 1.74L17.3 9.2c.44.84.7 1.79.7 2.8 0 3.31-2.69 6-6 6v-3l-4 4 4 4v-3c4.42 0 8-3.58 8-8 0-1.57-.46-3.03-1.24-4.26z"/>
+              </svg>
+              Sync from YouTube
+            </button>
+            <button id="btn-trigger-import" class="btn secondary flex-btn" title="Upload a Takeout JSON file manually">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+              </svg>
+              Upload JSON File
+            </button>
+            <button id="btn-obsidian-sync" class="btn secondary flex-btn" style="background: rgba(168, 85, 247, 0.1); border-color: rgba(168, 85, 247, 0.2); color: #c084fc;" title="Sync database with Obsidian on Mac">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
+              </svg>
+              Push to Obsidian
+            </button>
+            <button id="btn-reset-history" class="btn danger" style="padding: 8px 10px;" title="Reset / Clear all history data">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+              </svg>
+            </button>
+          </div>
+          <input type="file" id="takeout-file" accept=".json" style="display: none;">
+          <p class="import-help">
+            Sync automatically from YouTube or upload your <a href="https://takeout.google.com" target="_blank" class="help-link">Takeout JSON</a>.
+          </p>
+          <div id="import-status" class="import-status-text hidden">Processing...</div>
+        </section>
+      </div>
+
+      <div class="column-right">
+        <!-- Top Rewatched Videos Section -->
+        <section class="section stats-section">
+          <div class="stats-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <div style="display: flex; gap: 6px; align-items: center;">
+              <button id="btn-minimize-stats" class="btn secondary" style="padding: 2px 6px; font-size: 10px; border-radius: 4px; margin: 0; line-height: 1; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;" title="Minimize / Expand Section">
+                <svg id="stats-minimize-icon" viewBox="0 0 24 24" width="10" height="10" fill="currentColor">
+                  <path d="M19 13H5v-2h14v2z"/>
+                </svg>
+              </button>
+              <h2 id="stats-section-title" class="section-title" style="margin: 0;">Top Rewatched Videos</h2>
+              <button id="btn-toggle-stats-mode" class="btn secondary" style="padding: 2px 6px; font-size: 10px; border-radius: 4px; margin: 0; line-height: 1; min-width: 80px;" title="Switch between count and watch ratio ranking">Show Ratio</button>
+              <button id="btn-toggle-ads-view" class="btn secondary" style="padding: 2px 6px; font-size: 10px; border-radius: 4px; margin: 0; line-height: 1; display: inline-flex; align-items: center; gap: 3px;" title="Toggle Advertisements View">
+                <svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor">
+                  <path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-5 14H4v-4h11v4zm0-5H4V9h11v4zm5 5h-4V9h4v9z"/>
+                </svg>
+                Ad
+              </button>
+            </div>
+            <div style="display: flex; gap: 6px; align-items: center;">
+              <button id="btn-reset-ignored" class="btn secondary hidden" style="padding: 2px 6px; font-size: 10px; border-radius: 4px; margin: 0; line-height: 1;">Reset Hidden</button>
+              <select id="stats-timeframe-select" style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); color: #fff; border-radius: 6px; padding: 2px 4px; font-size: 10px; outline: none; cursor: pointer;">
+                <option value="all">All Time</option>
+                <option value="7">Past 7 Days</option>
+                <option value="30">Past 30 Days</option>
+                <option value="90">Past 90 Days</option>
+                <option value="365">Past Year</option>
+                <option value="custom">Custom...</option>
+              </select>
+              <span style="font-size: 10px; color: var(--color-text-secondary);">Show:</span>
+              <div style="display: flex; align-items: center; gap: 2px;">
+                <input type="text" id="stats-limit-input" value="10" style="width: 32px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); color: #fff; border-radius: 6px; padding: 2px 4px; font-size: 10px; outline: none; text-align: center;" title="Enter a number or click the infinity button for all videos">
+                <button id="btn-stats-limit-infinity" class="btn secondary" style="padding: 2px 4px; font-size: 10px; border-radius: 4px; margin: 0; line-height: 1; min-width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #fff; cursor: pointer;" title="Show all / Infinite limit">∞</button>
+              </div>
+            </div>
+          </div>
+          <div id="stats-custom-date-row" class="hidden" style="display: flex; gap: 6px; align-items: center; justify-content: flex-end; margin-bottom: 8px; animation: fadeIn 0.2s ease-out;">
+            <span style="font-size: 9px; color: var(--color-text-secondary);">Start:</span>
+            <input type="date" id="stats-start-date" style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); color: #fff; border-radius: 6px; padding: 2px 4px; font-size: 9px; outline: none; cursor: pointer;">
+            <span style="font-size: 9px; color: var(--color-text-secondary);">End:</span>
+            <input type="date" id="stats-end-date" style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); color: #fff; border-radius: 6px; padding: 2px 4px; font-size: 9px; outline: none; cursor: pointer;">
+          </div>
+          <div id="stats-settings-row" style="display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-bottom: 8px; animation: fadeIn 0.2s ease-out;">
+            <label style="display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--color-text-secondary); cursor: pointer; user-select: none;">
+              <input type="checkbox" id="chk-stats-show-thumbnails" style="cursor: pointer; accent-color: #818cf8;">
+              <span>Thumbnails</span>
+            </label>
+            <label id="lbl-stats-embed-player" style="display: none; align-items: center; gap: 4px; font-size: 10px; color: var(--color-text-secondary); cursor: pointer; user-select: none;">
+              <input type="checkbox" id="chk-stats-embed-player" style="cursor: pointer; accent-color: #818cf8;">
+              <span>Playable Video</span>
+            </label>
+            <div id="stats-zoom-control" class="hidden" style="display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--color-text-secondary); padding-left: 8px; border-left: 1px solid rgba(255, 255, 255, 0.1);">
+              <span>Zoom:</span>
+              <input type="range" id="stats-zoom-slider" min="1" max="3" step="0.1" value="1" style="width: 70px; height: 3px; accent-color: #818cf8; cursor: pointer;">
+              <span id="stats-zoom-val" style="min-width: 34px; font-size: 9px; color: var(--color-text-muted);">1.0x</span>
+            </div>
+          </div>
+          <div id="stats-criteria-row" style="display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-bottom: 8px; animation: fadeIn 0.2s ease-out;">
+            <div class="search-box" style="width: 140px; padding: 2px 6px; margin-right: auto; height: 16px; position: relative;">
+              <svg id="stats-search-icon" class="search-icon" viewBox="0 0 24 24" width="11" height="11" fill="currentColor" style="color: var(--color-text-muted); margin-right: 4px; flex-shrink: 0; cursor: pointer;">
+                <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+              </svg>
+              <input type="text" id="stats-search-input" placeholder="Search stats..." style="font-size: 10px; height: 100%; border: none; background: transparent; color: #fff; outline: none; width: 100%;" autocomplete="off">
+              <ul id="stats-search-history-dropdown" class="search-history-dropdown"></ul>
+            </div>
+            <span style="font-size: 9px; color: var(--color-text-secondary);">Min Watches:</span>
+            <input type="number" id="stats-min-watches" value="2" min="1" max="100" style="width: 32px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); color: #fff; border-radius: 6px; padding: 2px 4px; font-size: 9px; outline: none; text-align: center;">
+            <span style="font-size: 9px; color: var(--color-text-secondary);">Min Span (Days):</span>
+            <input type="number" id="stats-min-span" value="0" min="0" max="365" style="width: 32px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); color: #fff; border-radius: 6px; padding: 2px 4px; font-size: 9px; outline: none; text-align: center;">
+          </div>
+          <div id="stats-latenight-row" style="display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-bottom: 8px; animation: fadeIn 0.2s ease-out;">
+            <label style="display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--color-text-secondary); cursor: pointer; user-select: none; margin-right: auto;">
+              <input type="checkbox" id="chk-late-night" style="cursor: pointer; accent-color: #818cf8;">
+              <span style="font-weight: 600; color: #a5b4fc;">Late-Night Index 🌙</span>
+            </label>
+            <div id="late-night-settings" class="hidden" style="display: flex; align-items: center; gap: 6px; font-size: 9px; color: var(--color-text-secondary);">
+              <span>Start:</span>
+              <input type="time" id="late-night-start" value="00:00" style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); color: #fff; border-radius: 6px; padding: 1px 3px; font-size: 9px; outline: none; cursor: pointer; width: 48px;">
+              <span>End:</span>
+              <input type="time" id="late-night-end" value="04:00" style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); color: #fff; border-radius: 6px; padding: 1px 3px; font-size: 9px; outline: none; cursor: pointer; width: 48px;">
+              <label style="display: flex; align-items: center; gap: 3px; cursor: pointer; user-select: none; padding-left: 6px; border-left: 1px solid rgba(255, 255, 255, 0.1);">
+                <input type="checkbox" id="chk-group-channel" style="cursor: pointer; accent-color: #818cf8;">
+                <span>Group by Channel</span>
+              </label>
+            </div>
+          </div>
+          <div class="stats-container">
+            <ul id="top-videos-list" class="stats-list">
+              <!-- Dynamically populated -->
+            </ul>
+            <ul id="top-ads-list" class="stats-list hidden">
+              <!-- Dynamically populated -->
+            </ul>
+          </div>
+        </section>
+
+        <!-- History and Search Section -->
+        <section class="section history-section">
+          <div class="search-header">
+            <h2 class="section-title">Watch History</h2>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <label style="display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--color-text-secondary); cursor: pointer; user-select: none;">
+                <input type="checkbox" id="chk-show-thumbnails" style="cursor: pointer; accent-color: #818cf8;">
+                <span>Thumbnails</span>
+              </label>
+              <label id="lbl-embed-player" style="display: none; align-items: center; gap: 4px; font-size: 10px; color: var(--color-text-secondary); cursor: pointer; user-select: none;">
+                <input type="checkbox" id="chk-embed-player" style="cursor: pointer; accent-color: #818cf8;">
+                <span>Playable Video</span>
+              </label>
+              <div id="history-zoom-control" class="hidden" style="display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--color-text-secondary); padding-left: 8px; border-left: 1px solid rgba(255, 255, 255, 0.1);">
+                <span>Zoom:</span>
+                <input type="range" id="history-zoom-slider" min="1" max="3" step="0.1" value="1" style="width: 70px; height: 3px; accent-color: #818cf8; cursor: pointer;">
+                <span id="history-zoom-val" style="min-width: 34px; font-size: 9px; color: var(--color-text-muted);">1.0x</span>
+              </div>
+              <div class="search-box" style="position: relative;">
+                <svg id="history-search-icon" class="search-icon" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="cursor: pointer;">
+                  <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+                </svg>
+                <input type="text" id="search-input" placeholder="Search title or channel..." autocomplete="off">
+                <ul id="history-search-history-dropdown" class="search-history-dropdown"></ul>
+              </div>
+            </div>
+          </div>
+          
+          <div class="history-list-wrapper">
+            <ul class="history-list" id="history-list">
+              <!-- Dynamically populated -->
+            </ul>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

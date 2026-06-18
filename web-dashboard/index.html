@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Watch Tracker Dashboard</title>
+  <!-- Google Fonts Outfit & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" width="24" height="24">
+            <path fill="currentColor" d="M23,12L19,8V11H10V13H19V16L23,12M1,18V6C1,4.89 1.9,4 3,4H15A2,2 0 0,1 17,6V9H15V6H3V18H15V15H17V18A2,2 0 0,1 15,20H3A2,2 0 0,1 1,18Z"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="app-title">YouTube Watch Tracker</h1>
+          <p class="app-subtitle">Private Client-Side Visualizer Dashboard</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-load-demo" class="btn primary">Load Demo Data</button>
+        <button id="btn-clear-data" class="btn danger hidden">Clear Data</button>
+      </div>
+    </header>
+
+    <!-- Import State -->
+    <div id="import-section" class="import-section card">
+      <div class="import-dropzone" id="dropzone">
+        <svg viewBox="0 0 24 24" width="48" height="48" class="import-icon">
+          <path fill="currentColor" d="M19 13H13V19H11V13H5V11H11V5H13V11H19V13Z"/>
+        </svg>
+        <h3>Drag & Drop YouTube Watch History JSON</h3>
+        <p>Or click to select a file from your computer</p>
+        <p class="import-note">Your data remains 100% private and never leaves your computer.</p>
+        <input type="file" id="file-input" accept=".json" class="hidden">
+      </div>
+    </div>
+
+    <!-- Main Workspace Dashboard (hidden until data loaded) -->
+    <div id="main-dashboard" class="main-dashboard hidden">
+      <main class="app-body">
+        
+        <!-- Left Column: Calendar Activity -->
+        <div class="column-left">
+          <section class="section heatmap-section card">
+            <div class="heatmap-header-row">
+              <h2 class="section-title">Annual Watch Activity</h2>
+              <div style="display: flex; gap: 6px; align-items: center;">
+                <button id="btn-focus-top" class="btn secondary" title="Highlight only watches of videos shown in Top Rewatched Videos list">Highlight Top</button>
+                <select id="yt-calendar-year-select" style="display: none;"></select>
+                <select id="yt-calendar-type-select" class="dropdown-select">
+                  <option value="all">All Items</option>
+                  <option value="videos">Videos Only</option>
+                  <option value="shorts">Shorts Only</option>
+                </select>
+              </div>
+            </div>
+            
+            <div id="yt-calendar-years-row" class="years-row"></div>
+            
+            <div class="yt-tracker-calendar-container scrollable-calendar">
+              <div id="yt-calendar-vertical-list" class="yt-calendar-vertical-list"></div>
+            </div>
+            
+            <div class="yt-tracker-calendar-legend">
+              <span>Less Activity</span>
+              <div class="yt-tracker-legend-bar"></div>
+              <span>More Activity</span>
+            </div>
+          </section>
+        </div>
+
+        <!-- Right Column: Rankings & Controls -->
+        <div class="column-right">
+          <section class="section stats-section card">
+            <div class="stats-header-row">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <button id="btn-minimize-stats" class="icon-btn" title="Minimize/Maximize Section">&#8722;</button>
+                <h2 id="stats-section-title" class="section-title">Top Rewatched Videos</h2>
+              </div>
+              <div style="display: flex; gap: 6px; align-items: center;">
+                <button id="btn-toggle-ads-view" class="icon-btn" title="Toggle Ads View">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                  </svg>
+                </button>
+                <button id="btn-toggle-stats-mode" class="btn secondary">Show Ratio</button>
+              </div>
+            </div>
+
+            <div id="stats-collapsible-content">
+              <!-- Search & Display Controls -->
+              <div class="stats-settings-row">
+                <div class="search-input-wrapper">
+                  <input type="text" id="stats-search-input" class="text-input" placeholder="Search title or channel... (e.g. music OR tutorial)">
+                </div>
+                <div class="stats-criteria-selectors">
+                  <select id="stats-timeframe-select" class="dropdown-select">
+                    <option value="all">All Time</option>
+                    <option value="7">Past 7 Days</option>
+                    <option value="30">Past 30 Days</option>
+                    <option value="90">Past 90 Days</option>
+                    <option value="365">Past Year</option>
+                    <option value="custom">Custom...</option>
+                  </select>
+                  <span class="label-text">Show:</span>
+                  <input type="number" id="stats-limit-input" value="10" min="1" max="200" class="num-input">
+                </div>
+              </div>
+
+              <!-- Custom Date Range Row -->
+              <div id="stats-custom-date-row" class="hidden custom-date-row">
+                <span class="label-text">Start:</span>
+                <input type="date" id="stats-start-date" class="date-input">
+                <span class="label-text">End:</span>
+                <input type="date" id="stats-end-date" class="date-input">
+              </div>
+
+              <!-- Filters Checkbox Row -->
+              <div class="checkbox-row-container">
+                <div class="checkbox-label-group">
+                  <label class="checkbox-container">
+                    <input type="checkbox" id="chk-thumbnails">
+                    <span class="checkmark"></span>
+                    Show Thumbnails
+                  </label>
+                  <label class="checkbox-container">
+                    <input type="checkbox" id="chk-embeds">
+                    <span class="checkmark"></span>
+                    Playable Videos
+                  </label>
+                </div>
+                <div id="history-zoom-control" class="zoom-control-group hidden">
+                  <span class="label-text">Zoom:</span>
+                  <input type="range" id="history-zoom-slider" min="1" max="3" step="0.1" value="1">
+                </div>
+              </div>
+
+              <!-- Ignored count criteria slider row -->
+              <div class="stats-criteria-row">
+                <span class="label-text">Min Repeats:</span>
+                <input type="number" id="stats-min-watches" class="num-input" value="2" min="1" max="50">
+                <span class="label-text" style="margin-left:12px;">Min Span (Days):</span>
+                <input type="number" id="stats-min-span" class="num-input" value="0" min="0" max="365">
+              </div>
+
+              <!-- Top Rankings Lists -->
+              <div class="stats-list-container">
+                <ol id="top-videos-list" class="stats-list"></ol>
+                <ol id="top-ads-list" class="stats-list hidden"></ol>
+              </div>
+            </div>
+          </section>
+        </div>
+
+      </main>
+
+      <!-- Bottom Row: Detailed Logs List -->
+      <section class="section history-section card">
+        <div class="history-header">
+          <h2 class="section-title">Detailed Watch History Logs</h2>
+          <div class="history-search-row">
+            <input type="text" id="search-input" class="text-input" placeholder="Search watch logs... (exact: &quot;lofi beats&quot;, negate: -shorts, boolean: study OR focus)">
+            <select id="duration-filter-select" class="dropdown-select">
+              <option value="all">All Durations</option>
+              <option value="short">Short (< 4m)</option>
+              <option value="medium">Medium (4m - 20m)</option>
+              <option value="long">Long (> 20m)</option>
+            </select>
+          </div>
+        </div>
+        <div class="history-list-wrapper">
+          <ul id="history-list" class="history-list"></ul>
+          <div class="pagination-row">
+            <button id="btn-load-more" class="btn secondary hidden">Load More (+50)</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- Script loading -->
+  <script src="demo-data.js"></script>
+  <script src="index.js"></script>
+</body>
+</html>

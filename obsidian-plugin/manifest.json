@@ -1,0 +1,10 @@
+{
+  "id": "yt-watch-tracker",
+  "name": "YouTube Watch Tracker Dashboard",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Displays a premium Glassmorphic Dashboard of your YouTube watch history and annual watch activity heatmap inside Obsidian.",
+  "author": "Antigravity",
+  "authorUrl": "https://deepmind.google",
+  "isDesktopOnly": false
+}
