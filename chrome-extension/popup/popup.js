@@ -1,6 +1,11 @@
 // popup/popup.js
+import { initInsights, labelBadge } from './insights.js';
+
+const esc = globalThis.YTCore.esc;
 
 let watchHistory = { watches: {}, metadata: {} };
+let videoLabels = {}; // AI labels: {videoId: {category, topics, why}}
+let approxTimes = new Set(); // watch times that are only guesses (YouTube's history page has no times)
 let allLogEvents = [];
 let ignoredVideoIds = [];
 let statsRankingMode = 'count'; // 'count' or 'ratio'
@@ -36,13 +41,15 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   loadHistory();
   setupEventListeners();
+  initInsights({ onChanged: loadHistory });
 });
 
 // Load history from background service worker
 function loadHistory() {
   chrome.runtime.sendMessage({ action: 'getHistory' }, (response) => {
     if (response && response.success) {
-      watchHistory = response;
+      videoLabels = response.labels || {};
+      watchHistory = { watches: response.watches || {}, metadata: response.metadata || {} };
       processLogEvents();
       
       // Load ignored videos, limit, timeframe, rankingMode, custom dates, criteria, thumbnails, embedPlayer, statsEmbedPlayer, minimized, zoom, calendarType, focusTopVideos, recent search history, Late-Night Index, and Phase Detector settings from storage
@@ -329,6 +336,8 @@ function loadHistory() {
 function processLogEvents() {
   const events = [];
   const { watches, metadata } = watchHistory;
+  approxTimes = new Set();
+  Object.values(metadata).forEach((m) => (m && m.approx || []).forEach((t) => approxTimes.add(t)));
 
   Object.keys(watches).forEach((videoId) => {
     const meta = metadata[videoId] || { title: 'Unknown Video', channel: 'Unknown Channel', duration: '' };
@@ -342,6 +351,8 @@ function processLogEvents() {
         title: meta.title,
         channel: meta.channel,
         duration: meta.duration || '',
+        isShort: globalThis.YTCore.isShortMeta(meta),
+        approx: approxTimes.has(timestamp),
         year: dt.getFullYear(),
         dateStr: getLocalDateString(dt)
       });
@@ -722,7 +733,7 @@ function renderPhaseDetector() {
           <div class="phase-item" style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.015); border: 1px solid rgba(255, 255, 255, 0.03); border-radius: 8px; padding: 8px 12px; font-size: 11px;">
             <div style="text-align: left; min-width: 0; flex: 1; padding-right: 8px;">
               <div style="font-weight: 700; color: #fbbf24; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px;" title="${phase.channel}">${phase.channel}</span>
+                <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px;" title="${esc(phase.channel)}">${esc(phase.channel)}</span>
                 <span style="font-size: 9px; color: var(--color-text-muted); font-weight: normal;">(${phase.watchCount} watches)</span>
               </div>
               <div style="font-size: 9px; color: var(--color-text-muted); margin-top: 2px;">
@@ -1131,6 +1142,8 @@ function executeStatsSearch(query) {
 
 // Check if a timestamp falls within a specific local time window (e.g. "00:00" to "04:00")
 function isTimestampInTimeRange(ts, startTimeStr, endTimeStr) {
+  // A guessed time (a phone watch from YouTube's history page) says nothing about the hour.
+  if (approxTimes.has(ts)) return false;
   const date = new Date(ts);
   const hours = date.getHours();
   const minutes = date.getMinutes();
@@ -1860,7 +1873,7 @@ function renderHeatmap(selectedYear = currentSelectedYear) {
   allLogEvents.forEach((event) => {
     if (event.year !== selectedYear) return;
 
-    const isShort = event.channel === 'YouTube Shorts' || event.channel === 'Shorts';
+    const isShort = event.isShort;
     if (calendarType === 'videos' && isShort) return;
     if (calendarType === 'shorts' && !isShort) return;
 
@@ -2079,7 +2092,7 @@ function renderYearSelectorRow() {
   yearCounts[thisYear] = 0;
 
   allLogEvents.forEach((evt) => {
-    const isShort = evt.channel === 'YouTube Shorts' || evt.channel === 'Shorts';
+    const isShort = evt.isShort;
     if (calendarType === 'videos' && isShort) return;
     if (calendarType === 'shorts' && !isShort) return;
 
@@ -2213,10 +2226,10 @@ function renderHistoryList(events, limit = 50) {
         ${mediaHtml}
         <div style="flex-grow: 1; min-width: 0;">
           <h4 class="history-title">
-            <a href="${url}" target="_blank" title="${event.title}">${event.title}</a>
+            <a href="${esc(url)}" target="_blank" title="${esc(event.title)}">${esc(event.title)}</a>${labelBadge(videoLabels[event.videoId])}${event.isShort ? ' <span class="short-badge" title="Short">S</span>' : ''}
           </h4>
           <div class="history-meta">
-            <span class="history-channel">${event.channel}</span>
+            <span class="history-channel">${esc(event.channel)}</span>
             <span class="history-time">${dateStr} at ${timeStr} (${actionLabel})</span>
           </div>
         </div>
@@ -2227,7 +2240,7 @@ function renderHistoryList(events, limit = 50) {
             <path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V10h14v10zm-5-7h-5v5h5v-5z"/>
           </svg>
         </button>
-        <a class="icon-btn play-btn" href="${url}" target="_blank" title="Open Link">
+        <a class="icon-btn play-btn" href="${esc(url)}" target="_blank" title="Open Link">
           ${icon}
         </a>
         <button class="icon-btn copy-btn" title="Copy Obsidian Link">
@@ -2390,27 +2403,12 @@ function showToast(message) {
   }, 2000);
 }
 
-// Delete a single watch log timestamp
+// Delete a single watch log timestamp (through the service worker, so it can't race a sync)
 function deleteWatchEntry(videoId, timestamp) {
-  const timestamps = watchHistory.watches[videoId] || [];
-  const index = timestamps.indexOf(timestamp);
-  
-  if (index > -1) {
-    timestamps.splice(index, 1);
-    
-    if (timestamps.length === 0) {
-      // Clear entire record if no timestamps remain
-      chrome.runtime.sendMessage({ action: 'clearVideoHistory', videoId }, () => {
-        loadHistory();
-      });
-    } else {
-      // Save updated list
-      watchHistory.watches[videoId] = timestamps;
-      chrome.storage.local.set({ watches: watchHistory.watches }, () => {
-        loadHistory();
-      });
-    }
-  }
+  chrome.runtime.sendMessage({ action: 'deleteWatch', videoId, timestamp }, (response) => {
+    if (!response || !response.success) showToast(`Couldn't delete: ${response ? response.error : 'no answer'}`);
+    loadHistory();
+  });
 }
 
 // Export the entire history as a markdown file structured chronologically
@@ -2460,150 +2458,59 @@ function exportFullHistory() {
   showToast('Markdown exported!');
 }
 
-// Google Takeout JSON Import Handler
+// Google Takeout JSON (or this extension's own export) import
 function handleFileImport(e) {
   const file = e.target.files[0];
   if (!file) return;
+  e.target.value = ''; // The same file can be picked again later.
 
   const statusEl = document.getElementById('import-status');
-  statusEl.textContent = 'Reading file...';
-  statusEl.className = 'import-status-text';
-  statusEl.classList.remove('hidden');
+  const say = (text, kind) => {
+    statusEl.textContent = text;
+    statusEl.className = `import-status-text${kind ? ` ${kind}-import` : ''}`;
+    statusEl.classList.remove('hidden');
+  };
+  say('Reading file...');
 
   const reader = new FileReader();
   reader.onload = function(evt) {
+    let events;
     try {
-      statusEl.textContent = 'Parsing JSON history...';
-      const rawHistory = JSON.parse(evt.target.result);
-      
-      if (!Array.isArray(rawHistory)) {
-        throw new Error('Takeout history must be a JSON array.');
+      say('Parsing JSON history...');
+      const raw = JSON.parse(evt.target.result);
+      if (raw && !Array.isArray(raw) && raw.watches && raw.metadata) {
+        // This extension's / the dashboard's own export: { watches, metadata }.
+        events = [];
+        Object.keys(raw.watches).forEach((videoId) => {
+          const m = raw.metadata[videoId] || {};
+          const approx = new Set(m.approx || []);
+          (raw.watches[videoId] || []).forEach((timestamp) => events.push({ videoId, timestamp, title: m.title, channel: m.channel, duration: m.duration, isAd: m.isAd, isShort: m.isShort, approx: approx.has(timestamp) }));
+        });
+      } else {
+        events = globalThis.YTCore.eventsFromTakeout(raw);
       }
-
-      statusEl.textContent = 'Filtering YouTube watch events...';
-      const parsedEvents = [];
-      
-      rawHistory.forEach(item => {
-        // 1. YouTube Video Watch Records (including ads)
-        if (item.titleUrl && item.titleUrl.includes('youtube.com/watch')) {
-          const urlParts = item.titleUrl.split('?');
-          if (urlParts.length < 2) return;
-          
-          const urlParams = new URLSearchParams(urlParts[1]);
-          const videoId = urlParams.get('v');
-          if (!videoId) return;
-
-          // Clean Watched prefix
-          let title = item.title || 'Unknown Video';
-          if (title.startsWith('Watched ')) {
-            title = title.substring(8);
-          }
-
-          // Extract channel
-          let channel = 'Unknown Channel';
-          if (item.subtitles && item.subtitles.length > 0 && item.subtitles[0].name) {
-            channel = item.subtitles[0].name;
-          } else if (item.details && item.details.length > 0 && item.details[0].name) {
-            channel = item.details[0].name;
-          }
-
-          const isAd = (item.details && item.details.length > 0 && item.details[0].name === 'From Google Ads') || (channel === 'From Google Ads');
-
-          const timestamp = item.time ? new Date(item.time).getTime() : Date.now();
-          if (isNaN(timestamp)) return;
-
-          parsedEvents.push({ videoId, title, channel, timestamp, isAd });
-          return;
-        }
-
-        // 2. YouTube Search History Records
-        if (item.title && item.title.startsWith('Searched for ')) {
-          const query = item.title.substring(13).trim();
-          if (!query) return;
-
-          const videoId = `search:${encodeURIComponent(query)}`;
-          const title = item.title;
-          const channel = 'YouTube Search';
-          const timestamp = item.time ? new Date(item.time).getTime() : Date.now();
-          if (isNaN(timestamp)) return;
-
-          parsedEvents.push({ videoId, title, channel, timestamp });
-          return;
-        }
-
-        // 3. YouTube Sponsored Visits / Web Links (Ad redirects or Google Ads visits)
-        if (item.title && item.title.startsWith('Visited ')) {
-          let url = '';
-          if (item.titleUrl) {
-            // Check if it is a google.com/url redirect and extract actual url
-            if (item.titleUrl.includes('google.com/url?q=')) {
-              try {
-                const urlObj = new URL(item.titleUrl);
-                url = urlObj.searchParams.get('q') || item.titleUrl;
-              } catch (e) {
-                url = item.titleUrl;
-              }
-            } else {
-              url = item.titleUrl;
-            }
-          }
-
-          // Extract Domain
-          let domain = 'Sponsored Ad Link';
-          if (url) {
-            try {
-              const urlObj = new URL(url);
-              domain = urlObj.hostname;
-            } catch (e) {
-              domain = url;
-            }
-          }
-
-          const videoId = `visit:${encodeURIComponent(domain)}`;
-          const title = item.title;
-          
-          let channel = 'Google Ads';
-          if (item.details && item.details.length > 0 && item.details[0].name) {
-            channel = item.details[0].name;
-          }
-
-          const timestamp = item.time ? new Date(item.time).getTime() : Date.now();
-          if (isNaN(timestamp)) return;
-
-          parsedEvents.push({ videoId, title, channel, timestamp, isAd: true });
-          return;
-        }
-      });
-
-      if (parsedEvents.length === 0) {
-        throw new Error('No valid YouTube watch logs found in this file.');
-      }
-
-      statusEl.textContent = `Merging ${parsedEvents.length.toLocaleString()} history records...`;
-      
-      chrome.runtime.sendMessage({
-        action: 'batchImportHistory',
-        events: parsedEvents
-      }, (response) => {
-        if (response && response.success) {
-          statusEl.textContent = `Successfully loaded ${response.addedCount.toLocaleString()} new watch events!`;
-          statusEl.className = 'import-status-text success-import';
-          loadHistory(); // Reload and redraw popup
-        } else {
-          throw new Error(response ? response.error : 'Storage save failed.');
-        }
-      });
-
+      if (events.length === 0) throw new Error('No valid YouTube watch logs found in this file.');
     } catch (err) {
-      statusEl.textContent = `Error: ${err.message}`;
-      statusEl.className = 'import-status-text error-import';
+      say(`Error: ${err.message}`, 'error');
       console.error('[WatchTree] Import error:', err);
+      return;
     }
+
+    say(`Merging ${events.length.toLocaleString()} history records...`);
+    chrome.runtime.sendMessage({ action: 'batchImportHistory', events }, (response) => {
+      if (chrome.runtime.lastError || !response || !response.success) {
+        const why = chrome.runtime.lastError ? chrome.runtime.lastError.message : response ? response.error : 'Storage save failed.';
+        say(`Error: ${why}`, 'error');
+        return;
+      }
+      const skipped = events.length - response.addedCount - (response.replacedCount || 0);
+      say(`Added ${response.addedCount.toLocaleString()} new watch events${skipped > 0 ? ` (${skipped.toLocaleString()} were already logged)` : ''}.`, 'success');
+      loadHistory(); // Reload and redraw popup
+    });
   };
 
   reader.onerror = function() {
-    statusEl.textContent = 'Failed to read history file.';
-    statusEl.className = 'import-status-text error-import';
+    say('Failed to read history file.', 'error');
   };
 
   reader.readAsText(file);
@@ -2616,12 +2523,11 @@ function getEventUrl(event) {
     return `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
   }
   if (event.videoId.startsWith('visit:')) {
-    if (event.title.startsWith('Visited ')) {
-      return event.title.substring(8).trim();
-    }
-    return `https://www.google.com`;
+    const link = event.title.startsWith('Visited ') ? event.title.substring(8).trim() : '';
+    // Only web links (a file could carry a javascript: link).
+    return /^https?:\/\//i.test(link) ? link : `https://www.google.com`;
   }
-  return `https://www.youtube.com/watch?v=${event.videoId}`;
+  return `https://www.youtube.com/watch?v=${encodeURIComponent(event.videoId)}`;
 }
 
 function getEventActionLabel(event) {
@@ -2817,7 +2723,7 @@ function renderTopVideos(resetPagination = true) {
         titleText.style.maxWidth = '250px';
 
         const url = getEventUrl({ videoId: v.videoId });
-        titleText.innerHTML = `<a href="${url}" target="_blank" style="color: inherit; text-decoration: none; transition: color 0.15s ease;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='inherit'">${v.title}</a>`;
+        titleText.innerHTML = `<a href="${esc(url)}" target="_blank" style="color: inherit; text-decoration: none; transition: color 0.15s ease;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='inherit'">${esc(v.title)}</a>`;
 
         const vCount = document.createElement('span');
         vCount.style.color = 'var(--color-text-muted)';
@@ -3017,10 +2923,10 @@ function renderTopVideos(resetPagination = true) {
       ${mediaHtml}
       <div class="stats-info">
         <h4 class="stats-title">
-          <a href="${url}" target="_blank" title="${video.title}">${video.title}</a>
+          <a href="${esc(url)}" target="_blank" title="${esc(video.title)}">${esc(video.title)}</a>${labelBadge(videoLabels[video.videoId])}
         </h4>
         <div class="stats-meta">
-          <span class="stats-channel">${video.channel}</span>
+          <span class="stats-channel">${esc(video.channel)}</span>
           ${countBadge}
         </div>
         <div class="stats-timeline">
@@ -3238,10 +3144,10 @@ function renderTopAds() {
       ${mediaHtml}
       <div class="stats-info">
         <h4 class="stats-title">
-          <a href="${url}" target="_blank" title="${ad.title}">${ad.title}</a>
+          <a href="${esc(url)}" target="_blank" title="${esc(ad.title)}">${esc(ad.title)}</a>
         </h4>
         <div class="stats-meta">
-          <span class="stats-channel">${ad.channel}</span>
+          <span class="stats-channel">${esc(ad.channel)}</span>
           <span class="stats-watches-count" style="color: #ef4444; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.2);">${ad.count} impressions</span>
         </div>
         <div class="stats-timeline">
@@ -3472,8 +3378,8 @@ function openVideoCalendarModal(videoId, title, channel) {
     <div class="yt-tracker-modal-header" style="padding: 16px 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; justify-content: space-between; align-items: flex-start; background: rgba(255, 255, 255, 0.01);">
       <div class="yt-tracker-modal-title-group" style="display: flex; flex-direction: column; max-width: 320px; text-align: left;">
         <h3 style="margin: 0 0 4px 0; font-size: 16px; font-weight: 700; color: #ffffff;">Watch History Calendar</h3>
-        <p class="yt-tracker-video-title" style="margin: 0 0 2px 0; font-size: 12px; color: #9ca3af; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${title}">${title}</p>
-        <p class="yt-tracker-video-channel" style="margin: 0; font-size: 10px; color: #6366f1; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">${channel}</p>
+        <p class="yt-tracker-video-title" style="margin: 0 0 2px 0; font-size: 12px; color: #9ca3af; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(title)}">${esc(title)}</p>
+        <p class="yt-tracker-video-channel" style="margin: 0; font-size: 10px; color: #6366f1; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">${esc(channel)}</p>
       </div>
       <button class="yt-tracker-close-btn" style="background: transparent; border: none; color: #9ca3af; font-size: 24px; cursor: pointer; line-height: 1; padding: 0; margin: 0; transition: color 0.15s;">&times;</button>
     </div>

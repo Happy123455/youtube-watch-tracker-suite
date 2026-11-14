@@ -40,6 +40,18 @@ A premium, privacy-first analytics suite to capture, analyze, and visualize your
 ### ⚡ Chrome-Obsidian Sync Bridge
 * Features an automated background sync server running locally on port `12314`. The Chrome extension pushes new watches to Obsidian in real-time.
 
+### 🕚 Daily Sync (no clicks)
+* Once a day (23:30 by default, and a few minutes after Chrome starts when a run was missed) the extension adds the day's watches by itself, videos and Shorts:
+  1. **This Mac's Chrome history** first: exact times.
+  2. **Your YouTube account's history** for what Chrome here didn't see (the phone app, other computers). Its times are guesses (YouTube shows only the day), shown with a `~` and kept out of the late-night index.
+* Live tracking, the daily sync, history-page syncs and JSON/Takeout imports all merge into one history without duplicates (the same video within 5 minutes is one watch; a real time replaces a guess).
+
+### 🎓 AI Insights
+* Each newly watched video is labelled once **Useful/Educational** or **Entertainment** with 1 to 3 topics, from its title and channel only (never times, ids or your account).
+* A daily digest: useful vs entertainment split, Shorts, top topics, rising and fading interests (last 7 days against the 28 before) and a short AI note.
+* AI: Gemini Flash-Lite with your API key, or the Mac's own model through Ollama (free, nothing leaves the Mac). Set it under **AI Insights → ⚙**.
+* The digest also goes to Dynamic Journal on the same Mac when its MCP server is on.
+
 ### 🔍 Advanced Search Engine
 * Search inputs support boolean logic (`AND`, `OR`, `NOT` negation `-term`), exact double-quoted phrases (`"exact phrase"`), and regular expressions (`/pattern/`).
 * Interactive search histories with floating dropdowns.
@@ -71,4 +83,7 @@ A premium, privacy-first analytics suite to capture, analyze, and visualize your
 ---
 
 ## 🔒 Privacy & Data Policy
-All data stays local on your machine. The Chrome extension stores logs locally in `chrome.storage.local`, and the Obsidian plugin saves watch databases inside your vault's `yt-history.json` file. No servers are contacted, and no metrics leave your device.
+All data stays local on your machine. The Chrome extension stores logs locally in `chrome.storage.local`, and the Obsidian plugin saves watch databases inside your vault's `yt-history.json` file. Nothing is sent anywhere except: YouTube itself (to read your own watch history for the daily sync), and, only when AI Insights are on with a Gemini key, video titles and channel names to Google's Gemini API. With the local model nothing leaves the Mac.
+
+## 🧪 Tests
+`npm test` runs the core and daily-sync tests (Node 20+). After changing `chrome-extension/utils/yt-core.js`, run `npm run sync-core` to refresh the copy inside the Obsidian plugin.

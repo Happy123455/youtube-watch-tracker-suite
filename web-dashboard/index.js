@@ -1,4 +1,5 @@
 // index.js
+const esc = YTCore.esc;
 
 // App State
 let watchHistory = { watches: {}, metadata: {} };
@@ -176,21 +177,31 @@ function importFile(file) {
     try {
       const parsed = JSON.parse(e.target.result);
       
-      // Check if it is standard Chrome extension export or Google Takeout array
+      // A Google Takeout array, or the extension's own export: merged into what's loaded (a
+      // second file used to replace the first), without counting a watch twice.
+      let events;
       if (Array.isArray(parsed)) {
-        // Parse Google Takeout JSON format
         showToast('Converting Google Takeout JSON...');
-        const converted = convertTakeoutToNative(parsed);
-        watchHistory = converted;
+        events = YTCore.eventsFromTakeout(parsed);
       } else if (parsed && parsed.watches && parsed.metadata) {
-        // Parse Chrome extension backup format
-        watchHistory = parsed;
+        events = [];
+        Object.keys(parsed.watches).forEach((videoId) => {
+          const m = parsed.metadata[videoId] || {};
+          const approx = new Set(m.approx || []);
+          (parsed.watches[videoId] || []).forEach((timestamp) => events.push({ videoId, timestamp, title: m.title, channel: m.channel, duration: m.duration, isAd: m.isAd, isShort: m.isShort, approx: approx.has(timestamp) }));
+        });
       } else {
         throw new Error('Unrecognized JSON format. File must be a Google Takeout history array or extension backup.');
       }
-      
-      localStorage.setItem('yt_tracker_db', JSON.stringify(watchHistory));
-      showToast('Successfully imported watch history!');
+      const merged = { watches: watchHistory.watches || {}, metadata: watchHistory.metadata || {} };
+      const { added } = YTCore.mergeEvents(merged, events);
+      watchHistory = merged;
+      showToast(`Added ${added.toLocaleString()} new watches`);
+      try {
+        localStorage.setItem('yt_tracker_db', JSON.stringify(watchHistory));
+      } catch (e) {
+        showToast('Loaded, but too big to remember in this browser: load the file again next time');
+      }
       showDashboard();
       processLogEvents();
       renderAll();
@@ -205,57 +216,6 @@ function importFile(file) {
   };
 
   reader.readAsText(file);
-}
-
-// Google Takeout JSON Conversion
-function convertTakeoutToNative(rawHistory) {
-  const watches = {};
-  const metadata = {};
-
-  rawHistory.forEach(item => {
-    if (item.titleUrl && item.titleUrl.includes('youtube.com/watch')) {
-      const urlParts = item.titleUrl.split('?');
-      if (urlParts.length < 2) return;
-      const urlParams = new URLSearchParams(urlParts[1]);
-      const videoId = urlParams.get('v');
-      if (!videoId) return;
-
-      let title = item.title || 'Unknown Video';
-      if (title.startsWith('Watched ')) {
-        title = title.substring(8);
-      }
-
-      let channel = 'Unknown Channel';
-      if (item.subtitles && item.subtitles.length > 0 && item.subtitles[0].name) {
-        channel = item.subtitles[0].name;
-      } else if (item.details && item.details.length > 0 && item.details[0].name) {
-        channel = item.details[0].name;
-      }
-
-      const isAd = (item.details && item.details.length > 0 && item.details[0].name === 'From Google Ads') || (channel === 'From Google Ads');
-      const timestamp = item.time ? new Date(item.time).getTime() : Date.now();
-      if (isNaN(timestamp)) return;
-
-      if (!watches[videoId]) watches[videoId] = [];
-      watches[videoId].push(timestamp);
-
-      if (!metadata[videoId]) {
-        metadata[videoId] = {
-          title,
-          channel,
-          duration: '',
-          isAd
-        };
-      }
-    }
-  });
-
-  // Sort timestamps
-  Object.keys(watches).forEach(videoId => {
-    watches[videoId].sort((a, b) => a - b);
-  });
-
-  return { watches, metadata };
 }
 
 // UI Event Listeners binding
@@ -955,8 +915,8 @@ function renderTopVideos() {
       <span class="stats-rank">#${index + 1}</span>
       ${mediaHtml}
       <div class="stats-video-info">
-        <div class="stats-video-title" title="${item.title}">${item.title}</div>
-        <div class="stats-video-channel">${item.channel} ${item.duration ? `• ${item.duration}` : ''}</div>
+        <div class="stats-video-title" title="${esc(item.title)}">${esc(item.title)}</div>
+        <div class="stats-video-channel">${esc(item.channel)} ${item.duration ? `• ${item.duration}` : ''}</div>
         <div class="stats-last-seen">Span: ${firstStr} - ${lastStr}</div>
       </div>
       <span class="stats-count">${metricText}</span>
@@ -1045,8 +1005,8 @@ function renderTopAds() {
       <span class="stats-rank">#${index + 1}</span>
       ${mediaHtml}
       <div class="stats-video-info">
-        <div class="stats-video-title" title="${item.title}">${item.title}</div>
-        <div class="stats-video-channel">${item.channel}</div>
+        <div class="stats-video-title" title="${esc(item.title)}">${esc(item.title)}</div>
+        <div class="stats-video-channel">${esc(item.channel)}</div>
         <div class="stats-last-seen">Span: ${firstStr} - ${lastStr}</div>
       </div>
       <span class="stats-count">${item.count} views</span>
@@ -1133,12 +1093,12 @@ function renderHistoryList(events, limit = 50) {
 
     const typeStr = getEventTypeClass(event);
     const isSearch = event.videoId.startsWith('search:');
-    let titleHtml = event.title;
+    let titleHtml = esc(event.title);
     if (isNormalVideo) {
-      titleHtml = `<a href="https://www.youtube.com/watch?v=${event.videoId}" target="_blank" style="color:var(--text-primary); text-decoration:none; font-weight:500;">${event.title}</a>`;
+      titleHtml = `<a href="https://www.youtube.com/watch?v=${encodeURIComponent(event.videoId)}" target="_blank" style="color:var(--text-primary); text-decoration:none; font-weight:500;">${esc(event.title)}</a>`;
     } else if (isSearch) {
       const query = decodeURIComponent(event.videoId.substring(7));
-      titleHtml = `Searched: <a href="https://www.youtube.com/results?search_query=${encodeURIComponent(query)}" target="_blank" style="color:var(--text-primary); text-decoration:none; font-weight:500;">${query}</a>`;
+      titleHtml = `Searched: <a href="https://www.youtube.com/results?search_query=${encodeURIComponent(query)}" target="_blank" style="color:var(--text-primary); text-decoration:none; font-weight:500;">${esc(query)}</a>`;
     }
 
     li.innerHTML = `
@@ -1146,7 +1106,7 @@ function renderHistoryList(events, limit = 50) {
       <div class="history-info">
         <div class="history-title">${titleHtml}</div>
         <div class="history-meta">
-          <span class="history-tag ${typeStr}">${event.channel}</span>
+          <span class="history-tag ${typeStr}">${esc(event.channel)}</span>
           ${event.duration ? `<span>Duration: ${event.duration}</span>` : ''}
         </div>
       </div>

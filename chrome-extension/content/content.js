@@ -16,8 +16,7 @@ var scrollFails = 0;
 var initialWaitTicks = 0;
 const MAX_SCROLL_FAILS = 12; // Stop after ~18s of no new elements loading
 const SCROLL_INTERVAL_MS = 1500;
-var parsedHistoryData = [];
-var sessionHistorySequence = {};
+var parsedHistoryData = []; // [{videoId, title, channel, day, isShort}], newest first
 
 // Initialize script
 function init() {
@@ -161,7 +160,8 @@ function triggerActualWatchTimer(videoId) {
           videoId: videoId,
           title: videoDetails.title,
           channel: videoDetails.channel,
-          duration: videoDetails.duration
+          duration: videoDetails.duration,
+          isShort: videoDetails.isShort
         },
         (response) => {
           if (response && response.success) {
@@ -189,13 +189,24 @@ function clearWatchTimer() {
 
 // Scrape title, channel, and duration from DOM
 function scrapeVideoDetails() {
+  const isShort = window.location.pathname.startsWith('/shorts/');
+  // On a Short, YouTube keeps the last normal video's page hidden in the DOM, so its title and
+  // channel must come from the reel that's playing (older versions logged Shorts under the title
+  // of the last normal video watched).
+  const reel = isShort ? (document.querySelector('ytd-reel-video-renderer[is-active]') || document.querySelector('ytd-shorts')) : null;
+  const scope = reel || document.querySelector('ytd-watch-flexy:not([hidden])') || document;
   let title = '';
 
   // 1. Try visible DOM elements first (dynamically updated by YouTube SPA)
-  const titleEl = document.querySelector('h1.ytd-watch-metadata yt-formatted-string') || 
-                  document.querySelector('h1.title.style-scope.ytd-video-primary-info-renderer') ||
-                  document.querySelector('#title h1') ||
-                  document.querySelector('h1 a.yt-simple-endpoint');
+  const titleEl = isShort
+    ? (scope.querySelector('.ytShortsVideoTitleViewModelShortsVideoTitle') ||
+       scope.querySelector('yt-shorts-video-title-view-model h2') ||
+       scope.querySelector('h2.title') ||
+       scope.querySelector('#overlay h2'))
+    : (scope.querySelector('h1.ytd-watch-metadata yt-formatted-string') ||
+       scope.querySelector('h1.title.style-scope.ytd-video-primary-info-renderer') ||
+       scope.querySelector('#title h1') ||
+       scope.querySelector('h1 a.yt-simple-endpoint'));
   if (titleEl) {
     title = (titleEl.getAttribute('title') || titleEl.textContent).trim();
   }
@@ -203,7 +214,7 @@ function scrapeVideoDetails() {
   // 2. Try document.title (frequently updated by YouTube router)
   if (!title || title === 'Unknown Video') {
     if (document.title) {
-      title = document.title.replace(' - YouTube', '').trim();
+      title = document.title.replace(/^\(\d+\+?\)\s*/, '').replace(' - YouTube', '').trim();
     }
   }
 
@@ -223,13 +234,17 @@ function scrapeVideoDetails() {
   let channel = '';
 
   // 1. Try visible DOM channel elements first (dynamically updated by YouTube SPA)
-  const channelEl = document.querySelector('ytd-video-owner-renderer ytd-channel-name a') ||
-                    document.querySelector('yt-formatted-string.ytd-channel-name a') ||
-                    document.querySelector('#owner #channel-name a') ||
-                    document.querySelector('#meta #channel-name a') ||
-                    document.querySelector('ytd-video-owner-renderer ytd-channel-name') ||
-                    document.querySelector('ytd-video-owner-renderer') ||
-                    document.querySelector('#owner #channel-name');
+  const channelEl = isShort
+    ? (scope.querySelector('.ytReelChannelBarViewModelChannelName a') ||
+       scope.querySelector('ytd-channel-name a') ||
+       scope.querySelector('#channel-name a'))
+    : (scope.querySelector('ytd-video-owner-renderer ytd-channel-name a') ||
+       scope.querySelector('yt-formatted-string.ytd-channel-name a') ||
+       scope.querySelector('#owner #channel-name a') ||
+       scope.querySelector('#meta #channel-name a') ||
+       scope.querySelector('ytd-video-owner-renderer ytd-channel-name') ||
+       scope.querySelector('ytd-video-owner-renderer') ||
+       scope.querySelector('#owner #channel-name'));
   if (channelEl) {
     const titleAttr = channelEl.getAttribute('title');
     if (titleAttr) {
@@ -245,8 +260,8 @@ function scrapeVideoDetails() {
     channel = 'YouTube Shorts';
   }
 
-  // 3. Fallback to metadata author link
-  if (!channel || channel === 'Unknown Channel') {
+  // 3. Fallback to metadata author link (normal videos only: on a Short it describes the hidden page)
+  if (!isShort && (!channel || channel === 'Unknown Channel')) {
     const metaChannelEl = document.querySelector('span[itemprop="author"] link[itemprop="name"]') || 
                           document.querySelector('[itemprop="author"] [itemprop="name"]');
     if (metaChannelEl) {
@@ -259,10 +274,10 @@ function scrapeVideoDetails() {
     channel = 'Unknown Channel';
   }
 
-  const durationEl = document.querySelector('.ytp-time-duration');
+  const durationEl = scope.querySelector('.ytp-time-duration') || document.querySelector('.ytp-time-duration');
   const duration = durationEl ? durationEl.textContent.trim() : '';
 
-  return { title, channel, duration };
+  return { title, channel, duration: isShort ? '' : duration, isShort };
 }
 
 // Fetch history and inject tracker button
@@ -358,8 +373,8 @@ function openHistoryModal() {
     <div class="yt-tracker-modal-header">
       <div class="yt-tracker-modal-title-group">
         <h3>Watch History Calendar</h3>
-        <p class="yt-tracker-video-title">${details.title}</p>
-        <p class="yt-tracker-video-channel">${details.channel}</p>
+        <p class="yt-tracker-video-title">${YTCore.esc(details.title)}</p>
+        <p class="yt-tracker-video-channel">${YTCore.esc(details.channel)}</p>
       </div>
       <button class="yt-tracker-close-btn">&times;</button>
     </div>
@@ -778,65 +793,6 @@ init();
 // DIRECT HISTORY SYNC SCRAPER ENGINE
 // ==========================================
 
-// Helper mapping YouTube date texts to standard Date objects
-function parseYouTubeHistoryDate(text) {
-  const cleaned = text.trim().toLowerCase();
-  if (cleaned === 'today') {
-    return new Date();
-  }
-  if (cleaned === 'yesterday') {
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    return d;
-  }
-  
-  // Check relative text like "3 days ago", "2 weeks ago"
-  const relativeMatch = cleaned.match(/(\d+)\s+(day|week|month|year)s?\s+ago/);
-  if (relativeMatch) {
-    const val = parseInt(relativeMatch[1]);
-    const unit = relativeMatch[2];
-    const d = new Date();
-    if (unit === 'day') d.setDate(d.getDate() - val);
-    else if (unit === 'week') d.setDate(d.getDate() - val * 7);
-    else if (unit === 'month') d.setMonth(d.getMonth() - val);
-    else if (unit === 'year') d.setFullYear(d.getFullYear() - val);
-    return d;
-  }
-
-  // Standard dates: e.g. "May 30, 2026"
-  const parsed = new Date(text);
-  if (!isNaN(parsed.getTime())) {
-    return parsed;
-  }
-  return null;
-}
-
-// Helper to align visible DOM sequence with our running sequence for virtualization resilience
-function alignSequence(visibleIds, runningSequence) {
-  let bestOffset = 0;
-  let maxMatch = -1;
-  
-  for (let k = 0; k <= runningSequence.length; k++) {
-    let matchCount = 0;
-    let mismatch = false;
-    for (let i = 0; i < visibleIds.length; i++) {
-      if (k + i < runningSequence.length) {
-        if (visibleIds[i] === runningSequence[k + i]) {
-          matchCount++;
-        } else {
-          mismatch = true;
-          break;
-        }
-      }
-    }
-    if (!mismatch && matchCount > maxMatch) {
-      maxMatch = matchCount;
-      bestOffset = k;
-    }
-  }
-  return bestOffset;
-}
-
 // Scrapes loaded items on youtube.com/feed/history
 function scrapeHistoryPageElements() {
   const parsedRecords = [];
@@ -851,11 +807,11 @@ function scrapeHistoryPageElements() {
   const videoLinks = mainArea.querySelectorAll('a[href*="/watch?v="], a[href*="/shorts/"]');
   
   let lastSectionElement = null;
-  let lastParsedDate = new Date();
-  let sectionsProcessedCount = 0;
+  // Items above the first date header are today's; a header that isn't a date ("Shorts") keeps
+  // the day it's under. (Older versions guessed one day back for every unreadable header.)
+  let lastDay = YTCore.localDay(Date.now());
   
   const processedContainers = new Set();
-  const visibleItems = []; // Array of { videoId, title, channel, dateStr }
   
   videoLinks.forEach((link) => {
     const href = link.getAttribute('href');
@@ -939,94 +895,20 @@ function scrapeHistoryPageElements() {
       channel = channel.split('•')[0].split('\n')[0].trim();
     }
     
-    // 3. Find Section Date Header
+    // 3. The day: from the date section the card is in.
     const section = container.closest('ytd-item-section-renderer');
-    if (section) {
-      if (section !== lastSectionElement) {
-        lastSectionElement = section;
-        sectionsProcessedCount++;
-        
-        const titleEl = section.querySelector('yt-formatted-string#title') || 
-                        section.querySelector('#title') ||
-                        section.querySelector('.ytd-item-section-header-renderer');
-        let parsedDate = null;
-        let dateText = '';
-        if (titleEl) {
-          dateText = titleEl.textContent.trim();
-          parsedDate = parseYouTubeHistoryDate(dateText);
-        }
-        
-        if (parsedDate) {
-          lastParsedDate = parsedDate;
-        } else {
-          // If dateText is a sub-category or empty, DO NOT decrement the date
-          const lowerText = dateText.toLowerCase().trim();
-          const isCategory = lowerText === 'shorts' || 
-                             lowerText === 'music' || 
-                             lowerText === 'videos' || 
-                             lowerText === 'posts' || 
-                             lowerText === 'community' || 
-                             lowerText === 'comments' || 
-                             lowerText === 'live chat' || 
-                             lowerText === '';
-          
-          if (!isCategory && sectionsProcessedCount > 1) {
-            // Decrement previous date by 1 day sequentially only for genuine unparsed date sections
-            const prevDate = new Date(lastParsedDate);
-            prevDate.setDate(prevDate.getDate() - 1);
-            lastParsedDate = prevDate;
-          }
-        }
-      }
+    if (section && section !== lastSectionElement) {
+      lastSectionElement = section;
+      const headerEl = section.querySelector('yt-formatted-string#title') ||
+                       section.querySelector('#title') ||
+                       section.querySelector('.ytd-item-section-header-renderer');
+      const day = headerEl ? YTCore.parseHistoryHeader(headerEl.textContent) : null;
+      if (day) lastDay = day;
     }
-    
-    const yyyy = lastParsedDate.getFullYear();
-    const mm = String(lastParsedDate.getMonth() + 1).padStart(2, '0');
-    const dd = String(lastParsedDate.getDate()).padStart(2, '0');
-    const dateStr = `${yyyy}-${mm}-${dd}`;
-    
-    visibleItems.push({ videoId, title, channel, dateStr });
+    const isShort = href.includes('/shorts/') || container.tagName.toLowerCase() === 'ytd-reel-item-renderer';
+    parsedRecords.push({ videoId, title, channel, day: lastDay, isShort });
   });
-  
-  // Group visible items by date string and apply sequence alignment
-  const itemsByDate = {};
-  visibleItems.forEach(item => {
-    if (!itemsByDate[item.dateStr]) itemsByDate[item.dateStr] = [];
-    itemsByDate[item.dateStr].push(item);
-  });
-  
-  Object.keys(itemsByDate).forEach((dateStr) => {
-    const items = itemsByDate[dateStr];
-    const visibleIds = items.map(item => item.videoId);
-    
-    if (!sessionHistorySequence[dateStr]) {
-      sessionHistorySequence[dateStr] = [];
-    }
-    const runningSequence = sessionHistorySequence[dateStr];
-    
-    // Align sequence to get stable indices
-    const offset = alignSequence(visibleIds, runningSequence);
-    
-    items.forEach((item, i) => {
-      const seqIndex = offset + i;
-      if (seqIndex >= runningSequence.length) {
-        runningSequence.push(item.videoId);
-      }
-      
-      // Calculate a stable timestamp based on seqIndex (noon minus seqIndex minutes)
-      const baseTime = new Date(dateStr);
-      baseTime.setHours(12, 0, 0, 0);
-      const timestamp = baseTime.getTime() - (seqIndex * 60000); 
-      
-      parsedRecords.push({
-        videoId: item.videoId,
-        title: item.title,
-        channel: item.channel,
-        timestamp: timestamp
-      });
-    });
-  });
-  
+
   return parsedRecords;
 }
 
@@ -1095,7 +977,6 @@ function startDirectSync(isBackground = false) {
   scrollFails = 0;
   initialWaitTicks = 0;
   parsedHistoryData = [];
-  sessionHistorySequence = {};
 
   if (isBackgroundSync) {
     document.body.classList.add('yt-sync-body-active');
@@ -1121,10 +1002,10 @@ function runSyncLoop() {
 
   const currentScraped = scrapeHistoryPageElements();
   
-  // Merge unique entries
-  const seenKeys = new Set(parsedHistoryData.map(v => `${v.videoId}-${v.timestamp}`));
+  // Merge unique entries (one per video per day, in the order the page shows them: newest first)
+  const seenKeys = new Set(parsedHistoryData.map(v => `${v.day}|${v.videoId}`));
   currentScraped.forEach(item => {
-    const key = `${item.videoId}-${item.timestamp}`;
+    const key = `${item.day}|${item.videoId}`;
     if (!seenKeys.has(key)) {
       parsedHistoryData.push(item);
       seenKeys.add(key);
@@ -1184,45 +1065,61 @@ function runSyncLoop() {
 }
 
 function finishDirectSync(isComplete = false) {
+  if (!isSyncing && !syncOverlay) return;
   isSyncing = false;
   
   // Clear the badge immediately when starting to save to storage
   chrome.runtime.sendMessage({ action: 'clearSyncBadge' });
 
-  const statusTitle = syncOverlay.querySelector('.yt-sync-status-title');
-  const statusDesc = syncOverlay.querySelector('.yt-sync-status-desc');
-  const progressFiller = syncOverlay.querySelector('.yt-sync-progress-filler');
+  // The page only says which day: each day's videos get guessed times (marked approx), so a
+  // video already logged that day isn't added again, and a later real time replaces the guess.
+  const days = [...new Set(parsedHistoryData.map((it) => it.day))];
+  const events = days.flatMap((day) => YTCore.eventsFromHistoryItems(parsedHistoryData, day));
+
+  const overlay = syncOverlay || (injectSyncOverlay(), syncOverlay);
+  const statusTitle = overlay.querySelector('.yt-sync-status-title');
+  const statusDesc = overlay.querySelector('.yt-sync-status-desc');
+  const progressFiller = overlay.querySelector('.yt-sync-progress-filler');
   
   statusTitle.textContent = isComplete ? "Sync Complete!" : "Sync Paused & Saved!";
-  statusDesc.textContent = `Saving ${parsedHistoryData.length.toLocaleString()} videos to database...`;
+  statusDesc.textContent = `Saving ${events.length.toLocaleString()} videos to database...`;
   
   if (progressFiller) {
     progressFiller.style.width = '100%';
     progressFiller.classList.add('completed');
   }
 
+  const showClose = () => {
+    const controls = overlay.querySelector('.yt-sync-controls');
+    controls.textContent = '';
+    const close = document.createElement('button');
+    close.className = 'yt-sync-btn primary';
+    close.id = 'yt-sync-btn-close';
+    close.textContent = 'Close Dashboard';
+    close.addEventListener('click', () => {
+      document.body.classList.remove('yt-sync-body-active');
+      if (syncOverlay) {
+        syncOverlay.remove();
+        syncOverlay = null;
+      }
+    });
+    controls.appendChild(close);
+  };
+
   chrome.runtime.sendMessage({
     action: 'batchImportHistory',
-    events: parsedHistoryData
+    events
   }, (response) => {
-    if (response && response.success) {
-      statusDesc.innerHTML = `Successfully loaded <strong>${response.addedCount.toLocaleString()}</strong> new watch events into WatchTree!`;
-      
-      const controls = syncOverlay.querySelector('.yt-sync-controls');
-      controls.innerHTML = `
-        <button class="yt-sync-btn primary" id="yt-sync-btn-close">Close Dashboard</button>
-      `;
-
-      controls.querySelector('#yt-sync-btn-close').addEventListener('click', () => {
-        document.body.classList.remove('yt-sync-body-active');
-        if (syncOverlay) {
-          syncOverlay.remove();
-          syncOverlay = null;
-        }
-      });
+    if (chrome.runtime.lastError) {
+      statusDesc.textContent = `Error saving: ${chrome.runtime.lastError.message}`;
+    } else if (response && response.success) {
+      const added = response.addedCount || 0;
+      const fixed = response.replacedCount || 0;
+      statusDesc.textContent = `Added ${added.toLocaleString()} new watches${fixed ? ` (${fixed} got their real time)` : ''}. Videos already logged on that day were skipped.`;
     } else {
       statusDesc.textContent = `Error saving: ${response ? response.error : 'Storage error'}`;
     }
+    showClose();
   });
 }
 
@@ -1279,7 +1176,7 @@ function updateSyncOverlayStats() {
   
   if (dateEl && parsedHistoryData.length > 0) {
     const oldestItem = parsedHistoryData[parsedHistoryData.length - 1];
-    const d = new Date(oldestItem.timestamp);
+    const d = new Date(YTCore.dayBounds(oldestItem.day).start);
     dateEl.textContent = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
   }
 }

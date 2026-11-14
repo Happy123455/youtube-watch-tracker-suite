@@ -1,0 +1,8 @@
+{
+  "name": "youtube-watch-tracker-suite",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "sync-core": "node scripts/sync-core.mjs"
+  }
+}

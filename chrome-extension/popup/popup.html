@@ -34,6 +34,42 @@
     <!-- Main Content -->
     <main class="app-body">
       <div class="column-left">
+        <!-- AI Insights & Daily Sync -->
+        <section class="section ai-section" id="ai-insights">
+          <div class="ai-head">
+            <h2 class="section-title" style="margin: 0;">AI Insights &amp; Daily Sync</h2>
+            <div class="ai-day-nav">
+              <button id="ai-prev-day" class="btn secondary ai-mini" title="Day before">‹</button>
+              <span id="ai-day-label">Today</span>
+              <button id="ai-next-day" class="btn secondary ai-mini" title="Day after">›</button>
+            </div>
+          </div>
+          <div id="ai-day" class="ai-day"></div>
+          <div class="button-row ai-actions">
+            <button id="ai-sync-now" class="btn secondary flex-btn" title="Fetch today's (and any missed days') watches now and label them">⟳ Sync now</button>
+            <button id="ai-label-old" class="btn secondary flex-btn" title="Label up to 200 older videos that have no label yet">🏷 Label older videos</button>
+            <button id="ai-settings-toggle" class="btn secondary" title="Daily sync and AI settings">⚙</button>
+          </div>
+          <div id="ai-settings" class="ai-settings hidden">
+            <label class="ai-row"><input type="checkbox" id="ai-daily-on"> Sync once a day at <input type="time" id="ai-daily-time" value="23:30"></label>
+            <label class="ai-row"><input type="checkbox" id="ai-src-chrome"> <span>This Mac's Chrome history (exact times)</span></label>
+            <label class="ai-row"><input type="checkbox" id="ai-src-account"> <span>My YouTube account's history (phone app and other devices; day only)</span></label>
+            <label class="ai-row"><input type="checkbox" id="ai-on"> <span>Label videos with AI (titles and channels only are sent)</span></label>
+            <label class="ai-row">AI:
+              <select id="ai-provider">
+                <option value="auto">Gemini if a key is set, else this Mac's model</option>
+                <option value="gemini">Gemini (Flash-Lite, cheapest)</option>
+                <option value="local">This Mac's model (Ollama, free)</option>
+              </select>
+            </label>
+            <label class="ai-row">Gemini key: <input type="password" id="ai-key" autocomplete="off" spellcheck="false"> <button id="ai-key-clear" class="btn secondary ai-mini" title="Forget the saved key">✕</button></label>
+            <label class="ai-row">Local model: <input type="text" id="ai-local-model" value="llama3.2" spellcheck="false"></label>
+            <label class="ai-row"><input type="checkbox" id="ai-journal"> <span>Send each day's digest to Dynamic Journal on this Mac</span></label>
+            <button id="ai-test" class="btn secondary">Test AI</button>
+          </div>
+          <div id="ai-sync-log" class="ai-sync-log"></div>
+        </section>
+
         <!-- Heatmap Section -->
         <section class="section heatmap-section">
           <div class="heatmap-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -294,6 +330,7 @@
       </div>
     </main>
   </div>
+  <script src="../utils/yt-core.js"></script>
   <script src="popup.js" type="module"></script>
 </body>
 </html>

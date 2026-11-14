@@ -1,6 +1,628 @@
 /* main.js */
 const { Plugin, ItemView, WorkspaceLeaf, PluginSettingTab, Setting, Notice, Platform } = require('obsidian');
 
+// ---- BEGIN yt-core.js (an exact copy of chrome-extension/utils/yt-core.js; tests check it) ----
+// utils/yt-core.js
+// Pure helpers shared by every part of the suite: the extension's service worker, content script
+// and popup, the web dashboard, and the tests. No chrome.* calls here.
+//
+// It is a classic script (no import/export) so it can be loaded everywhere: a <script> tag, a
+// content script list, `import './yt-core.js'` for its side effect in an ES module, or require()
+// in Node. Everything is on globalThis.YTCore. The Obsidian plugin keeps copies of a few of these
+// functions (it ships as one file); tests/core.test.js checks the copies stay identical.
+(function (root) {
+  'use strict';
+
+  /** Two logs of the same video closer than this are one watch: a reload, a redirect, or the same
+   *  watch seen twice (live tracking, Chrome's history, a Takeout import). Live tracking already
+   *  used 5 minutes, so a real rewatch after that still counts. */
+  const SAME_WATCH_MS = 5 * 60 * 1000;
+
+  const pad = (n) => String(n).padStart(2, '0');
+
+  /** Local calendar day of a timestamp, "YYYY-MM-DD". */
+  function localDay(ts) {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  /** Start (inclusive) and end (exclusive) of a local day, in ms. */
+  function dayBounds(day) {
+    const [y, m, d] = day.split('-').map(Number);
+    return { start: new Date(y, m - 1, d).getTime(), end: new Date(y, m - 1, d + 1).getTime() };
+  }
+
+  function addDays(day, n) {
+    const [y, m, d] = day.split('-').map(Number);
+    return localDay(new Date(y, m - 1, d + n, 12).getTime());
+  }
+
+  /** The days after `from` up to and including `to` (both "YYYY-MM-DD"), oldest first, at most
+   *  `max` (the newest ones). With no `from`, just `to`. */
+  function daysBetween(from, to, max) {
+    const limit = max || 30;
+    const out = [];
+    let d = from ? addDays(from, 1) : to;
+    while (d <= to && out.length < 400) {
+      out.push(d);
+      d = addDays(d, 1);
+    }
+    return out.slice(-limit);
+  }
+
+  /** The video id and whether it is a Short, from a YouTube watch URL; null if it isn't one. */
+  function parseYouTubeUrl(url) {
+    let u;
+    try {
+      u = new URL(url);
+    } catch (e) {
+      return null;
+    }
+    const host = u.hostname.replace(/^(www|m)\./, '');
+    const valid = (id) => (id && /^[A-Za-z0-9_-]{6,20}$/.test(id) ? id : null);
+    if (host === 'youtu.be') {
+      const id = valid(u.pathname.slice(1).split('/')[0]);
+      return id ? { videoId: id, isShort: false } : null;
+    }
+    if (host !== 'youtube.com' && host !== 'music.youtube.com') return null;
+    if (u.pathname.startsWith('/shorts/')) {
+      const id = valid(u.pathname.split('/')[2]);
+      return id ? { videoId: id, isShort: true } : null;
+    }
+    if (u.pathname === '/watch') {
+      const id = valid(u.searchParams.get('v'));
+      return id ? { videoId: id, isShort: false } : null;
+    }
+    return null;
+  }
+
+  /** "(3) Some title - YouTube" → "Some title". */
+  function cleanTitle(t) {
+    return String(t || '')
+      .replace(/^\(\d+\+?\)\s*/, '')
+      .replace(/\s*[-–]\s*YouTube( Music)?\s*$/i, '')
+      .trim();
+  }
+
+  /** Text made safe to put inside HTML (titles come from YouTube: anyone can name a video `<img …>`). */
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  }
+
+  const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+  /**
+   * A history section header ("Today", "Yesterday", "Monday", "Nov 3", "3 Nov 2025",
+   * "May 30, 2026", "Sunday, Nov 2", "3 days ago") as a local day, or null when it isn't a date
+   * (e.g. "Shorts"). A date without a year that would land in the future belongs to last year.
+   */
+  function parseHistoryHeader(text, now) {
+    const at = now == null ? Date.now() : now;
+    const s = String(text || '').trim().toLowerCase().replace(/[,.]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!s) return null;
+    const today = localDay(at);
+    if (s === 'today') return today;
+    if (s === 'yesterday') return addDays(today, -1);
+    const wd = WEEKDAYS.indexOf(s);
+    if (wd >= 0) {
+      // This week: Today and Yesterday have their own names, so a weekday is 2 to 7 days back.
+      const back = (new Date(at).getDay() - wd + 7) % 7 || 7;
+      return addDays(today, -back);
+    }
+    const rel = s.match(/^(\d+)\s+(day|week|month|year)s?\s+ago$/);
+    if (rel) {
+      const n = Number(rel[1]);
+      const d = new Date(at);
+      if (rel[2] === 'day') d.setDate(d.getDate() - n);
+      else if (rel[2] === 'week') d.setDate(d.getDate() - n * 7);
+      else if (rel[2] === 'month') d.setMonth(d.getMonth() - n);
+      else d.setFullYear(d.getFullYear() - n);
+      return localDay(d.getTime());
+    }
+    // "nov 3", "3 nov", "nov 3 2025", "3 november 2025", "sunday nov 2"
+    let month = -1;
+    let day = 0;
+    let year = 0;
+    for (const w of s.split(' ')) {
+      if (WEEKDAYS.includes(w) || WEEKDAYS.some((x) => x.slice(0, 3) === w)) continue;
+      const m = MONTHS.indexOf(w.slice(0, 3));
+      if (m >= 0 && /^[a-z]+$/.test(w) && month < 0) month = m;
+      else if (/^\d{4}$/.test(w)) year = Number(w);
+      else if (/^\d{1,2}$/.test(w) && !day) day = Number(w);
+      else return null;
+    }
+    if (month < 0 || day < 1 || day > 31) return null;
+    let y = year || new Date(at).getFullYear();
+    let candidate = new Date(y, month, day, 12);
+    if (candidate.getMonth() !== month) return null; // "Feb 31"
+    if (!year && localDay(candidate.getTime()) > today) candidate = new Date(y - 1, month, day, 12);
+    return localDay(candidate.getTime());
+  }
+
+  /**
+   * Watch events from a Google Takeout watch-history.json (an array of activity records).
+   * Searches and sponsored visits are kept as before (`search:` / `visit:` ids).
+   */
+  function eventsFromTakeout(raw) {
+    if (!Array.isArray(raw)) throw new Error('Takeout history must be a JSON array.');
+    const out = [];
+    const timeOf = (item) => {
+      const t = item.time ? new Date(item.time).getTime() : NaN;
+      return isFinite(t) ? t : null;
+    };
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue;
+      const ts = timeOf(item);
+      if (ts === null) continue; // A record without a time can't be placed: skip it, don't guess "now".
+      const p = item.titleUrl ? parseYouTubeUrl(item.titleUrl) : null;
+      if (p) {
+        let title = String(item.title || 'Unknown Video');
+        if (title.startsWith('Watched ')) title = title.slice(8);
+        let channel = 'Unknown Channel';
+        if (item.subtitles && item.subtitles[0] && item.subtitles[0].name) channel = item.subtitles[0].name;
+        else if (item.details && item.details[0] && item.details[0].name) channel = item.details[0].name;
+        const isAd = !!(item.details && item.details[0] && item.details[0].name === 'From Google Ads') || channel === 'From Google Ads';
+        out.push({ videoId: p.videoId, title, channel, timestamp: ts, isAd, isShort: p.isShort, source: 'takeout' });
+        continue;
+      }
+      const title = String(item.title || '');
+      if (title.startsWith('Searched for ')) {
+        const query = title.slice(13).trim();
+        if (query) out.push({ videoId: `search:${encodeURIComponent(query)}`, title, channel: 'YouTube Search', timestamp: ts, source: 'takeout' });
+        continue;
+      }
+      if (title.startsWith('Visited ')) {
+        let url = item.titleUrl || '';
+        try {
+          if (url.includes('google.com/url?q=')) url = new URL(url).searchParams.get('q') || url;
+        } catch (e) {
+          // Keep the raw link.
+        }
+        let domain = 'Sponsored Ad Link';
+        if (url) {
+          try {
+            domain = new URL(url).hostname;
+          } catch (e) {
+            domain = url;
+          }
+        }
+        const channel = (item.details && item.details[0] && item.details[0].name) || 'Google Ads';
+        out.push({ videoId: `visit:${encodeURIComponent(domain)}`, title, channel, timestamp: ts, isAd: true, source: 'takeout' });
+      }
+    }
+    return out;
+  }
+
+  /** A YouTube video id, or a search/visit record's id (what the pages put in links and attributes). */
+  const validId = (id) => typeof id === 'string' && /^(?:[A-Za-z0-9_-]{6,20}|(?:search|visit):[A-Za-z0-9%._~!*'()-]{0,2000})$/.test(id);
+
+  const KNOWN = (v, bad) => (v && bad.indexOf(v) < 0 ? v : '');
+
+  /**
+   * Merges watch events into a history ({watches, metadata}) in place, without duplicates.
+   * An event: {videoId, title, channel, timestamp, duration?, isAd?, isShort?, approx?}.
+   * `approx` = the time is a guess (YouTube's history page only gives the day): it is skipped when
+   * the video already has a watch that day, and an exact time for that day replaces it.
+   * Returns {added, replaced}.
+   */
+  function mergeEvents(history, events, sameMs) {
+    const win = sameMs || SAME_WATCH_MS;
+    history.watches = history.watches || {};
+    history.metadata = history.metadata || {};
+    let added = 0;
+    let replaced = 0;
+    for (const ev of events || []) {
+      if (!ev || !validId(ev.videoId) || typeof ev.timestamp !== 'number' || !isFinite(ev.timestamp)) continue;
+      const id = ev.videoId;
+      const list = history.watches[id] || (history.watches[id] = []);
+      const meta = history.metadata[id] || null;
+      const approx = meta && Array.isArray(meta.approx) ? meta.approx.slice() : [];
+      const day = localDay(ev.timestamp);
+      let changed = false;
+      if (ev.approx) {
+        if (!list.some((t) => localDay(t) === day)) {
+          list.push(ev.timestamp);
+          approx.push(ev.timestamp);
+          added++;
+          changed = true;
+        }
+      } else if (!list.some((t) => approx.indexOf(t) < 0 && Math.abs(t - ev.timestamp) < win)) {
+        // An exact time for a watch that so far only had a guessed one that day.
+        const guess = list.findIndex((t) => approx.indexOf(t) >= 0 && localDay(t) === day);
+        if (guess >= 0) {
+          approx.splice(approx.indexOf(list[guess]), 1);
+          list[guess] = ev.timestamp;
+          replaced++;
+        } else {
+          list.push(ev.timestamp);
+          added++;
+        }
+        changed = true;
+      }
+      if (changed) list.sort((a, b) => a - b);
+      if (!list.length) {
+        delete history.watches[id];
+        continue;
+      }
+      const title = KNOWN(ev.title, ['Unknown Video']);
+      const channel = KNOWN(ev.channel, ['Unknown Channel', 'YouTube Shorts', 'Shorts']);
+      const oldTitle = meta ? KNOWN(meta.title, ['Unknown Video']) : '';
+      const oldChannel = meta ? KNOWN(meta.channel, ['Unknown Channel', 'YouTube Shorts', 'Shorts']) : '';
+      const next = Object.assign({}, meta || {}, {
+        // The newest known title wins (titles get edited); a missing one never replaces a known one.
+        title: title && (!oldTitle || ev.timestamp >= ((meta && meta.lastWatched) || 0)) ? title : oldTitle || 'Unknown Video',
+        // A real channel name beats "YouTube Shorts" (what live tracking writes for Shorts).
+        channel: oldChannel || channel || (meta && meta.channel) || ev.channel || 'Unknown Channel',
+        duration: (meta && meta.duration) || ev.duration || '',
+        lastWatched: list.reduce((m, t) => (t > m ? t : m), 0),
+        isAd: !!(ev.isAd || (meta && meta.isAd)),
+        isShort: !!(ev.isShort || (meta && meta.isShort) || ev.channel === 'YouTube Shorts'),
+      });
+      if (approx.length) next.approx = approx.filter((t) => list.indexOf(t) >= 0);
+      else delete next.approx;
+      if (next.approx && !next.approx.length) delete next.approx;
+      history.metadata[id] = next;
+    }
+    return { added, replaced };
+  }
+
+  /** Old history-page guesses: whole minutes counted back from noon (12:00:00.000, 11:59:00.000…). */
+  function looksGuessed(t) {
+    const d = new Date(t);
+    return d.getSeconds() === 0 && d.getMilliseconds() === 0 && (d.getHours() < 12 || (d.getHours() === 12 && d.getMinutes() === 0));
+  }
+
+  /**
+   * One-time repair of histories filled by older versions: watches of one video less than
+   * SAME_WATCH_MS apart become one; old history-page guesses on a day that also has a real time
+   * go, and several guesses of one video on one day become one. Returns how many were removed.
+   */
+  function repairDuplicates(history, sameMs) {
+    const win = sameMs || SAME_WATCH_MS;
+    let removed = 0;
+    for (const id of Object.keys(history.watches || {})) {
+      const before = history.watches[id] || [];
+      const meta = (history.metadata || {})[id];
+      const marked = meta && Array.isArray(meta.approx) ? meta.approx : [];
+      const guessed = (t) => marked.indexOf(t) >= 0 || looksGuessed(t);
+      const sorted = Array.from(new Set(before.filter((t) => typeof t === 'number' && isFinite(t)))).sort((a, b) => a - b);
+      const out = [];
+      for (const t of sorted) {
+        const prev = out[out.length - 1];
+        if (prev !== undefined && t - prev < win && !guessed(prev) && !guessed(t)) continue;
+        out.push(t);
+      }
+      const byDay = new Map();
+      for (const t of out) {
+        const k = localDay(t);
+        if (!byDay.has(k)) byDay.set(k, []);
+        byDay.get(k).push(t);
+      }
+      const keep = [];
+      for (const ts of byDay.values()) {
+        const exact = ts.filter((t) => !guessed(t));
+        keep.push.apply(keep, exact);
+        if (!exact.length) keep.push(ts[ts.length - 1]);
+      }
+      keep.sort((a, b) => a - b);
+      removed += before.length - keep.length;
+      if (keep.length) history.watches[id] = keep;
+      else delete history.watches[id];
+      if (meta && meta.approx) {
+        meta.approx = meta.approx.filter((t) => keep.indexOf(t) >= 0);
+        if (!meta.approx.length) delete meta.approx;
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Watch events from Chrome's history. `visits` = [{url, title, time}] (any sites, any order).
+   * Visits of one video within SAME_WATCH_MS are one watch. A Short left within `minShortMs` for
+   * another YouTube page was swiped past, not watched (live tracking needs 10 s too).
+   */
+  function eventsFromChromeVisits(visits, start, end, minShortMs) {
+    const minShort = minShortMs == null ? 3000 : minShortMs;
+    const yt = visits
+      .map((v) => ({ v, p: parseYouTubeUrl(v.url) }))
+      .filter((x) => x.p && x.v.time >= start && x.v.time < end)
+      .sort((a, b) => a.v.time - b.v.time);
+    const titles = new Map();
+    for (const { v, p } of yt) {
+      const t = cleanTitle(v.title);
+      if (t && t.toLowerCase() !== 'youtube' && !titles.has(p.videoId)) titles.set(p.videoId, t);
+    }
+    const last = new Map();
+    const events = [];
+    yt.forEach(({ v, p }, i) => {
+      const next = yt[i + 1];
+      if (p.isShort && next && next.v.time - v.time < minShort) return;
+      const prev = last.get(p.videoId);
+      if (prev !== undefined && v.time - prev < SAME_WATCH_MS) return;
+      last.set(p.videoId, v.time);
+      events.push({
+        videoId: p.videoId,
+        title: titles.get(p.videoId) || 'Unknown Video',
+        channel: p.isShort ? 'YouTube Shorts' : 'Unknown Channel',
+        timestamp: v.time,
+        isShort: p.isShort,
+        source: 'chrome',
+      });
+    });
+    return events;
+  }
+
+  const textOf = (t) => (!t ? '' : typeof t === 'string' ? t : t.simpleText || t.content || (Array.isArray(t.runs) ? t.runs.map((r) => r.text).join('') : ''));
+
+  function videoOf(n) {
+    for (const k of ['videoRenderer', 'reelItemRenderer', 'compactVideoRenderer', 'gridVideoRenderer']) {
+      const r = n[k];
+      if (r && r.videoId) {
+        const title = textOf(r.title) || textOf(r.headline) || '';
+        const channel = textOf(r.ownerText) || textOf(r.shortBylineText) || textOf(r.longBylineText) || '';
+        const short = k === 'reelItemRenderer';
+        return { videoId: r.videoId, title: title || 'Unknown Video', channel: channel || (short ? 'YouTube Shorts' : 'Unknown Channel'), isShort: short };
+      }
+    }
+    const sl = n.shortsLockupViewModel;
+    if (sl) {
+      const ep = sl.onTap && sl.onTap.innertubeCommand && sl.onTap.innertubeCommand.reelWatchEndpoint;
+      const id = (ep && ep.videoId) || String(sl.entityId || '').replace(/^shorts-shelf-item-/, '');
+      const title = (sl.overlayMetadata && textOf(sl.overlayMetadata.primaryText)) || String(sl.accessibilityText || '').split(',')[0];
+      if (id && /^[A-Za-z0-9_-]{6,20}$/.test(id)) return { videoId: id, title: title || 'Unknown Video', channel: 'YouTube Shorts', isShort: true };
+    }
+    const lv = n.lockupViewModel;
+    if (lv && lv.contentId && (!lv.contentType || lv.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO')) {
+      const meta = lv.metadata && lv.metadata.lockupMetadataViewModel;
+      const title = meta ? textOf(meta.title) : '';
+      let channel = '';
+      try {
+        channel = textOf(meta.metadata.contentMetadataViewModel.metadataRows[0].metadataParts[0].text);
+      } catch (e) {
+        channel = '';
+      }
+      return { videoId: lv.contentId, title: title || 'Unknown Video', channel: channel || 'Unknown Channel', isShort: false };
+    }
+    return null;
+  }
+
+  /**
+   * Videos in YouTube's history page data (ytInitialData, or a continuation answer), under their
+   * date headers: [{day, videoId, title, channel, isShort}] in page order (newest first). Walks the
+   * JSON generically, so renamed renderers don't break it as long as sections have a title and
+   * items have a video id. `day` carries over from the previous page (a day split across pages).
+   */
+  function itemsFromHistoryData(data, now, startDay) {
+    const out = [];
+    const seen = new Set();
+    let lastDay = startDay || null;
+    const headerOf = (sec) => {
+      const h = sec.header || {};
+      for (const k of Object.keys(h)) {
+        const t = textOf(h[k] && h[k].title);
+        if (t) return t;
+      }
+      return '';
+    };
+    const visit = (node, day, depth) => {
+      if (!node || typeof node !== 'object' || depth > 60) return;
+      if (Array.isArray(node)) {
+        for (const n of node) visit(n, day, depth + 1);
+        return;
+      }
+      if (node.itemSectionRenderer) {
+        const sec = node.itemSectionRenderer;
+        const d = parseHistoryHeader(headerOf(sec), now);
+        if (d) lastDay = d;
+        // Sub-sections ("Shorts") stay on the day of the date section they're in.
+        visit(sec.contents, d || day || lastDay, depth + 1);
+        return;
+      }
+      const item = videoOf(node);
+      if (item) {
+        const d = day || lastDay;
+        if (d) {
+          const key = `${d}|${item.videoId}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            out.push(Object.assign({ day: d }, item));
+          }
+        }
+        return;
+      }
+      for (const k of Object.keys(node)) visit(node[k], day, depth + 1);
+    };
+    visit(data, null, 0);
+    return { items: out, lastDay };
+  }
+
+  /** The continuation token for the next page of the history list, or null. */
+  function findContinuation(data) {
+    let token = null;
+    const visit = (node, depth) => {
+      if (token || !node || typeof node !== 'object' || depth > 60) return;
+      if (Array.isArray(node)) {
+        for (const n of node) visit(n, depth + 1);
+        return;
+      }
+      const c = node.continuationItemRenderer;
+      if (c) {
+        const ep = c.continuationEndpoint || (c.button && c.button.buttonRenderer && c.button.buttonRenderer.command) || {};
+        const cmd = ep.continuationCommand;
+        if (cmd && cmd.token) {
+          token = cmd.token;
+          return;
+        }
+      }
+      for (const k of Object.keys(node)) visit(node[k], depth + 1);
+    };
+    visit(data, 0);
+    return token;
+  }
+
+  /** The JSON assigned to `name` in a YouTube page's HTML (ytInitialData), or null. */
+  function extractJsonVar(html, name) {
+    const text = String(html);
+    const marks = [`var ${name} = `, `window["${name}"] = `, `${name} = `];
+    for (const m of marks) {
+      const at = text.indexOf(m);
+      if (at < 0) continue;
+      const start = text.indexOf('{', at + m.length - 1);
+      const end = matchBrace(text, start);
+      if (end < 0) continue;
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch (e) {
+        // Try the next form.
+      }
+    }
+    return null;
+  }
+
+  /** The index of the brace closing the one at `start` (strings and escapes respected), or -1. */
+  function matchBrace(s, start) {
+    if (start < 0 || s[start] !== '{') return -1;
+    let depth = 0;
+    let inStr = false;
+    for (let i = start; i < s.length; i++) {
+      const c = s[i];
+      if (inStr) {
+        if (c === '\\') i++;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === '{') depth++;
+      else if (c === '}') {
+        depth--;
+        if (depth === 0) return i;
+      }
+    }
+    return -1;
+  }
+
+  /** The values YouTube's own page sends with API calls (ytcfg.set({...})): key, client context. */
+  function extractYtcfg(html) {
+    const text = String(html);
+    const cfg = {};
+    let at = text.indexOf('ytcfg.set({');
+    while (at >= 0) {
+      const start = at + 'ytcfg.set('.length;
+      const end = matchBrace(text, start);
+      if (end < 0) break;
+      try {
+        Object.assign(cfg, JSON.parse(text.slice(start, end + 1)));
+      } catch (e) {
+        // Not JSON (rare): skip it.
+      }
+      at = text.indexOf('ytcfg.set({', end);
+    }
+    return cfg;
+  }
+
+  /**
+   * One day's items from the account history page as events with guessed times (the page has no
+   * times): seconds apart in page order, back from noon (or from now, for today before noon), so
+   * the order stays right and they never show up as late-night watches. Marked `approx`.
+   */
+  function eventsFromHistoryItems(items, day, now) {
+    const at = now == null ? Date.now() : now;
+    const { start } = dayBounds(day);
+    const anchor = Math.min(start + 12 * 3600 * 1000 - 1000, at); // the newest guess sits just before noon
+    return items
+      .filter((it) => it.day === day)
+      .map((it, i) => ({
+        videoId: it.videoId,
+        title: it.title,
+        channel: it.channel,
+        isShort: it.isShort,
+        timestamp: Math.max(start, Math.floor((anchor - i * 1000) / 1000) * 1000 + 1),
+        approx: true,
+        source: 'account',
+      }));
+  }
+
+  // ───────── Interests (counting only, no AI) ─────────
+
+  const isShortMeta = (meta) => !!(meta && (meta.isShort || meta.channel === 'YouTube Shorts' || meta.channel === 'Shorts'));
+
+  /** Watches on a day, oldest first: [{videoId, timestamp}] (searches and ad visits left out). */
+  function watchesOnDay(history, day) {
+    const { start, end } = dayBounds(day);
+    const out = [];
+    const all = history.watches || {};
+    for (const videoId of Object.keys(all)) {
+      if (videoId.indexOf(':') >= 0) continue;
+      for (const t of all[videoId]) if (t >= start && t < end) out.push({ videoId, timestamp: t });
+    }
+    return out.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  /** Topic counts for watches from `fromDay` to `toDay` (inclusive), using the AI labels. */
+  function topicCounts(history, labels, fromDay, toDay) {
+    const counts = {};
+    const start = dayBounds(fromDay).start;
+    const end = dayBounds(toDay).end;
+    const all = history.watches || {};
+    for (const videoId of Object.keys(all)) {
+      const l = labels[videoId];
+      if (!l || !Array.isArray(l.topics)) continue;
+      const n = all[videoId].filter((t) => t >= start && t < end).length;
+      if (!n) continue;
+      for (const topic of l.topics) {
+        const k = String(topic).toLowerCase().trim();
+        if (k) counts[k] = (counts[k] || 0) + n;
+      }
+    }
+    return counts;
+  }
+
+  /** How interests shift: each topic's share of watches recently against before (so a busy week
+   *  doesn't make everything "rise"). */
+  function interestShift(recent, earlier, limit) {
+    const n = limit || 6;
+    const total = (c) => Object.values(c).reduce((a, b) => a + b, 0) || 1;
+    const rt = total(recent);
+    const et = total(earlier);
+    const keys = Array.from(new Set(Object.keys(recent).concat(Object.keys(earlier))));
+    const rows = keys.map((k) => ({ topic: k, recent: recent[k] || 0, earlier: earlier[k] || 0, delta: (recent[k] || 0) / rt - (earlier[k] || 0) / et }));
+    return {
+      rising: rows.filter((r) => r.delta > 0 && r.recent >= 2).sort((a, b) => b.delta - a.delta).slice(0, n),
+      fading: rows.filter((r) => r.delta < 0 && r.earlier >= 2).sort((a, b) => a.delta - b.delta).slice(0, n),
+      top: rows.filter((r) => r.recent > 0).sort((a, b) => b.recent - a.recent).slice(0, n),
+    };
+  }
+
+  /** A day's numbers: watches, useful vs entertainment, Shorts, not yet labelled. */
+  function daySummary(history, labels, day) {
+    const ws = watchesOnDay(history, day);
+    const s = { day, watches: ws.length, useful: 0, distraction: 0, unlabelled: 0, shorts: 0, topics: {} };
+    for (const w of ws) {
+      const meta = (history.metadata || {})[w.videoId] || {};
+      if (isShortMeta(meta)) s.shorts++;
+      const l = labels[w.videoId];
+      if (!l) s.unlabelled++;
+      else if (l.category === 'useful') s.useful++;
+      else s.distraction++;
+      for (const t of (l && l.topics) || []) s.topics[t] = (s.topics[t] || 0) + 1;
+    }
+    return s;
+  }
+
+  const YTCore = {
+    SAME_WATCH_MS, localDay, dayBounds, addDays, daysBetween, parseYouTubeUrl, cleanTitle, esc,
+    parseHistoryHeader, eventsFromTakeout, mergeEvents, looksGuessed, repairDuplicates,
+    eventsFromChromeVisits, itemsFromHistoryData, findContinuation, extractJsonVar, extractYtcfg,
+    eventsFromHistoryItems, isShortMeta, validId, watchesOnDay, topicCounts, interestShift, daySummary,
+  };
+  root.YTCore = YTCore;
+  if (typeof module !== 'undefined' && module.exports) module.exports = YTCore;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+// ---- END yt-core.js ----
+const YTCore = globalThis.YTCore;
+const esc = YTCore.esc;
+
 const VIEW_TYPE_YT_TRACKER = 'youtube-watch-tracker-dashboard';
 
 const DEFAULT_SETTINGS = {
@@ -47,12 +669,11 @@ function getEventUrl(event) {
     return `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
   }
   if (event.videoId.startsWith('visit:')) {
-    if (event.title.startsWith('Visited ')) {
-      return event.title.substring(8).trim();
-    }
-    return `https://www.google.com`;
+    const link = event.title.startsWith('Visited ') ? event.title.substring(8).trim() : '';
+    // Only web links (an imported file could carry a javascript: link).
+    return /^https?:\/\//i.test(link) ? link : `https://www.google.com`;
   }
-  return `https://www.youtube.com/watch?v=${event.videoId}`;
+  return `https://www.youtube.com/watch?v=${encodeURIComponent(event.videoId)}`;
 }
 
 // Check if a timestamp falls within a specific local time window (e.g. "00:00" to "04:00")
@@ -340,7 +961,12 @@ class YtTrackerView extends ItemView {
   }
 
   async loadHistory() {
-    this.watchHistory = await this.plugin.loadHistoryData();
+    try {
+      this.watchHistory = await this.plugin.loadHistoryData();
+    } catch (e) {
+      new Notice(`YouTube Tracker: ${e.message}`);
+      this.watchHistory = { watches: {}, metadata: {} };
+    }
     this.processLogEvents();
 
     const minWatchesInput = this.containerEl.querySelector('#stats-min-watches');
@@ -946,11 +1572,16 @@ class YtTrackerView extends ItemView {
     if (clearHistoryBtn) {
       clearHistoryBtn.addEventListener('click', () => {
         if (confirm('CAUTION: This will delete ALL watches and metadata. Are you sure?')) {
-          this.watchHistory = { watches: {}, metadata: {} };
-          this.plugin.saveHistoryData(this.watchHistory).then(() => {
+          this.plugin.updateHistory((h) => {
+            // One copy is kept next to the history file until the next reset.
+            return this.plugin.writeBackup(h).then(() => {
+              h.watches = {};
+              h.metadata = {};
+            });
+          }).then(() => {
             this.loadHistory();
-            new Notice('YouTube history database reset!');
-          });
+            new Notice('YouTube history database reset! (A backup copy was kept)');
+          }, (e) => new Notice(`Couldn't reset: ${e.message}`));
         }
       });
     }
@@ -1462,12 +2093,12 @@ class YtTrackerView extends ItemView {
       const isVisit = event.videoId.startsWith('visit:');
       const url = getEventUrl(event);
 
-      let titleMarkup = `<a href="${url}" target="_blank">${event.title}</a>`;
+      let titleMarkup = `<a href="${esc(url)}" target="_blank">${esc(event.title)}</a>`;
       if (isSearch) {
         const query = decodeURIComponent(event.videoId.substring(7));
-        titleMarkup = `Searched: <a href="${url}" target="_blank" style="font-style: italic; color: #a855f7;">"${query}"</a>`;
+        titleMarkup = `Searched: <a href="${esc(url)}" target="_blank" style="font-style: italic; color: #a855f7;">"${esc(query)}"</a>`;
       } else if (isVisit) {
-        titleMarkup = `Visited Sponsored link: <a href="${url}" target="_blank" style="color: #f87171;">${event.title}</a>`;
+        titleMarkup = `Visited Sponsored link: <a href="${esc(url)}" target="_blank" style="color: #f87171;">${esc(event.title)}</a>`;
       }
 
       let durationMarkup = event.duration ? `<span class="history-duration" style="background: rgba(255, 255, 255, 0.05); padding: 1px 4px; border-radius: 3px; font-weight: 500;">${event.duration}</span>` : '';
@@ -1477,7 +2108,7 @@ class YtTrackerView extends ItemView {
         <div class="history-info">
           <h4 class="history-title">${titleMarkup}</h4>
           <div class="history-meta">
-            <span class="history-channel">${event.channel}</span>
+            <span class="history-channel">${esc(event.channel)}</span>
             <span>•</span>
             <span class="history-time" title="${date.toLocaleString()}">${dateStr}, ${timeStr}</span>
             ${durationMarkup}
@@ -1510,19 +2141,17 @@ class YtTrackerView extends ItemView {
       if (deleteBtn) {
         deleteBtn.addEventListener('click', () => {
           if (confirm(`Remove this watch entry from database?`)) {
-            const vWatches = this.watchHistory.watches[event.videoId] || [];
-            const idx = vWatches.indexOf(event.timestamp);
-            if (idx > -1) {
-              vWatches.splice(idx, 1);
-              if (vWatches.length === 0) {
-                delete this.watchHistory.watches[event.videoId];
-                delete this.watchHistory.metadata[event.videoId];
+            this.plugin.updateHistory((h) => {
+              const vWatches = (h.watches[event.videoId] || []).filter((t) => t !== event.timestamp);
+              if (vWatches.length) h.watches[event.videoId] = vWatches;
+              else {
+                delete h.watches[event.videoId];
+                delete h.metadata[event.videoId];
               }
-              this.plugin.saveHistoryData(this.watchHistory).then(() => {
-                this.loadHistory();
-                new Notice('Entry removed!');
-              });
-            }
+            }).then(() => {
+              this.loadHistory();
+              new Notice('Entry removed!');
+            }, (e) => new Notice(`Couldn't remove it: ${e.message}`));
           }
         });
       }
@@ -1672,7 +2301,7 @@ class YtTrackerView extends ItemView {
           titleText.style.maxWidth = '250px';
 
           const url = getEventUrl({ videoId: v.videoId });
-          titleText.innerHTML = `<a href="${url}" target="_blank" style="color: inherit; text-decoration: none; transition: color 0.15s ease;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='inherit'">${v.title}</a>`;
+          titleText.innerHTML = `<a href="${esc(url)}" target="_blank" style="color: inherit; text-decoration: none; transition: color 0.15s ease;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='inherit'">${esc(v.title)}</a>`;
 
           const vCount = document.createElement('span');
           vCount.style.color = 'var(--color-text-muted)';
@@ -1834,9 +2463,9 @@ class YtTrackerView extends ItemView {
         <div class="stats-rank-badge rank-${index + 1}">#${index + 1}</div>
         ${mediaHtml}
         <div class="stats-info">
-          <h4 class="stats-title"><a href="${url}" target="_blank" title="${video.title}">${video.title}</a></h4>
+          <h4 class="stats-title"><a href="${esc(url)}" target="_blank" title="${esc(video.title)}">${esc(video.title)}</a></h4>
           <div class="stats-meta">
-            <span class="stats-channel">${video.channel}</span>
+            <span class="stats-channel">${esc(video.channel)}</span>
             ${countBadge}
           </div>
           <div class="stats-timeline">
@@ -2017,9 +2646,9 @@ class YtTrackerView extends ItemView {
         <div class="stats-rank-badge rank-${index + 1}">#${index + 1}</div>
         ${mediaHtml}
         <div class="stats-info">
-          <h4 class="stats-title"><a href="${url}" target="_blank" title="${ad.title}">${ad.title}</a></h4>
+          <h4 class="stats-title"><a href="${esc(url)}" target="_blank" title="${esc(ad.title)}">${esc(ad.title)}</a></h4>
           <div class="stats-meta">
-            <span class="stats-channel">${ad.channel}</span>
+            <span class="stats-channel">${esc(ad.channel)}</span>
             <span class="stats-watches-count" style="color: #ef4444; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.2);">${ad.count} impressions</span>
           </div>
           <div class="stats-timeline">
@@ -2045,12 +2674,13 @@ class YtTrackerView extends ItemView {
       if (deleteBtn) {
         deleteBtn.addEventListener('click', () => {
           if (confirm(`Delete ad "${ad.title}"?`)) {
-            delete this.watchHistory.watches[ad.videoId];
-            delete this.watchHistory.metadata[ad.videoId];
-            this.plugin.saveHistoryData(this.watchHistory).then(() => {
+            this.plugin.updateHistory((h) => {
+              delete h.watches[ad.videoId];
+              delete h.metadata[ad.videoId];
+            }).then(() => {
               this.loadHistory();
               new Notice('Ad video removed!');
-            });
+            }, (e) => new Notice(`Couldn't remove it: ${e.message}`));
           }
         });
       }
@@ -2319,8 +2949,8 @@ class YtTrackerView extends ItemView {
       <div class="yt-tracker-modal-header" style="padding: 16px 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); display: flex; justify-content: space-between; align-items: flex-start; background: rgba(255, 255, 255, 0.01);">
         <div class="yt-tracker-modal-title-group" style="display: flex; flex-direction: column; max-width: 320px; text-align: left;">
           <h3 style="margin: 0 0 4px 0; font-size: 16px; font-weight: 700; color: #ffffff; line-height: 1.2;">Watch History Calendar</h3>
-          <p class="yt-tracker-video-title" style="margin: 0 0 2px 0; font-size: 12px; color: #9ca3af; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${title}">${title}</p>
-          <p class="yt-tracker-video-channel" style="margin: 0; font-size: 10px; color: #6366f1; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">${channel}</p>
+          <p class="yt-tracker-video-title" style="margin: 0 0 2px 0; font-size: 12px; color: #9ca3af; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${esc(title)}">${esc(title)}</p>
+          <p class="yt-tracker-video-channel" style="margin: 0; font-size: 10px; color: #6366f1; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">${esc(channel)}</p>
         </div>
         <button class="yt-tracker-close-btn" style="background: transparent; border: none; color: #9ca3af; font-size: 24px; cursor: pointer; line-height: 1; padding: 0; margin: 0; transition: color 0.15s;">&times;</button>
       </div>
@@ -2959,7 +3589,7 @@ class YtTrackerView extends ItemView {
             <div class="phase-item" style="display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.015); border: 1px solid rgba(255, 255, 255, 0.03); border-radius: 8px; padding: 8px 12px; font-size: 11px;">
               <div style="text-align: left; min-width: 0; flex: 1; padding-right: 8px;">
                 <div style="font-weight: 700; color: #fbbf24; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                  <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px;" title="${phase.channel}">${phase.channel}</span>
+                  <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px;" title="${esc(phase.channel)}">${esc(phase.channel)}</span>
                   <span style="font-size: 9px; color: var(--color-text-muted); font-weight: normal;">(${phase.watchCount} watches)</span>
                 </div>
                 <div style="font-size: 9px; color: var(--color-text-muted); margin-top: 2px;">
@@ -3211,109 +3841,29 @@ class YtTrackerView extends ItemView {
         statusEl.textContent = 'Parsing JSON...';
         const rawHistory = JSON.parse(evt.target.result);
         
-        if (!Array.isArray(rawHistory)) {
-          throw new Error('Takeout history must be a JSON array.');
-        }
-
         statusEl.textContent = 'Filtering events...';
-        const parsedEvents = [];
-        
-        rawHistory.forEach(item => {
-          if (item.titleUrl && item.titleUrl.includes('youtube.com/watch')) {
-            const urlParts = item.titleUrl.split('?');
-            if (urlParts.length < 2) return;
-            const urlParams = new URLSearchParams(urlParts[1]);
-            const videoId = urlParams.get('v');
-            if (!videoId) return;
-
-            let title = item.title || 'Unknown Video';
-            if (title.startsWith('Watched ')) title = title.substring(8);
-
-            let channel = 'Unknown Channel';
-            if (item.subtitles && item.subtitles.length > 0 && item.subtitles[0].name) {
-              channel = item.subtitles[0].name;
-            } else if (item.details && item.details.length > 0 && item.details[0].name) {
-              channel = item.details[0].name;
-            }
-            const isAd = (item.details && item.details.length > 0 && item.details[0].name === 'From Google Ads') || (channel === 'From Google Ads');
-            const timestamp = item.time ? new Date(item.time).getTime() : Date.now();
-            if (isNaN(timestamp)) return;
-            parsedEvents.push({ videoId, title, channel, timestamp, isAd });
-            return;
-          }
-
-          if (item.title && item.title.startsWith('Searched for ')) {
-            const query = item.title.substring(13).trim();
-            if (!query) return;
-            const videoId = `search:${encodeURIComponent(query)}`;
-            const timestamp = item.time ? new Date(item.time).getTime() : Date.now();
-            if (isNaN(timestamp)) return;
-            parsedEvents.push({ videoId, title: item.title, channel: 'YouTube Search', timestamp });
-            return;
-          }
-
-          if (item.title && item.title.startsWith('Visited ')) {
-            let url = '';
-            if (item.titleUrl) {
-              if (item.titleUrl.includes('google.com/url?q=')) {
-                try {
-                  const urlObj = new URL(item.titleUrl);
-                  url = urlObj.searchParams.get('q') || item.titleUrl;
-                } catch (e) { url = item.titleUrl; }
-              } else { url = item.titleUrl; }
-            }
-
-            let domain = 'Sponsored Ad Link';
-            if (url) {
-              try { domain = new URL(url).hostname; } catch (e) { domain = url; }
-            }
-            const videoId = `visit:${encodeURIComponent(domain)}`;
-            let channel = 'Google Ads';
-            if (item.details && item.details.length > 0 && item.details[0].name) {
-              channel = item.details[0].name;
-            }
-            const timestamp = item.time ? new Date(item.time).getTime() : Date.now();
-            if (isNaN(timestamp)) return;
-            parsedEvents.push({ videoId, title: item.title, channel, timestamp, isAd: true });
-            return;
-          }
-        });
+        let parsedEvents;
+        if (rawHistory && !Array.isArray(rawHistory) && rawHistory.watches && rawHistory.metadata) {
+          // The extension's own export.
+          parsedEvents = [];
+          Object.keys(rawHistory.watches).forEach((videoId) => {
+            const m = rawHistory.metadata[videoId] || {};
+            const approx = new Set(m.approx || []);
+            (rawHistory.watches[videoId] || []).forEach((timestamp) => parsedEvents.push({ videoId, timestamp, title: m.title, channel: m.channel, duration: m.duration, isAd: m.isAd, isShort: m.isShort, approx: approx.has(timestamp) }));
+          });
+        } else {
+          parsedEvents = YTCore.eventsFromTakeout(rawHistory);
+        }
 
         if (parsedEvents.length === 0) {
           throw new Error('No valid YouTube watch logs found in this file.');
         }
 
         statusEl.textContent = `Merging ${parsedEvents.length.toLocaleString()} history records...`;
-        
         let addedCount = 0;
-        const data = this.watchHistory;
-        parsedEvents.forEach(({ videoId, title, channel, timestamp, isAd }) => {
-          if (!videoId) return;
-          if (!data.watches[videoId]) data.watches[videoId] = [];
-          
-          const videoWatches = data.watches[videoId];
-          if (!videoWatches.includes(timestamp)) {
-            videoWatches.push(timestamp);
-            addedCount++;
-          }
-
-          const currentMeta = data.metadata[videoId];
-          if (!currentMeta || timestamp > (currentMeta.lastWatched || 0)) {
-            data.metadata[videoId] = {
-              title,
-              channel,
-              duration: currentMeta ? currentMeta.duration : '',
-              lastWatched: currentMeta ? Math.max(currentMeta.lastWatched || 0, timestamp) : timestamp,
-              isAd: isAd || (currentMeta ? currentMeta.isAd : false)
-            };
-          }
+        await this.plugin.updateHistory((h) => {
+          addedCount = YTCore.mergeEvents(h, parsedEvents).added;
         });
-
-        Object.keys(data.watches).forEach(videoId => {
-          data.watches[videoId].sort((a, b) => a - b);
-        });
-
-        await this.plugin.saveHistoryData(data);
         statusEl.textContent = `Successfully merged ${addedCount.toLocaleString()} new watch events!`;
         statusEl.className = 'import-status-text success-import';
         this.loadHistory();
@@ -3362,8 +3912,19 @@ class YtTrackerPlugin extends Plugin {
     try {
       const http = require('http');
       this.localServer = http.createServer(async (req, res) => {
-        // Set CORS headers
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        // Only the Chrome extension (and Obsidian itself) may talk to this server. Any web page
+        // could otherwise post to 127.0.0.1 and overwrite the history (browsers send an Origin).
+        const origin = req.headers.origin || '';
+        const allowed = !origin || origin.startsWith('chrome-extension://') || origin === 'app://obsidian.md';
+        if (!allowed) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Forbidden origin' }));
+          return;
+        }
+        if (origin) {
+          res.setHeader('Access-Control-Allow-Origin', origin);
+          res.setHeader('Vary', 'Origin');
+        }
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
@@ -3375,80 +3936,48 @@ class YtTrackerPlugin extends Plugin {
 
         if (req.method === 'POST') {
           let body = '';
-          req.on('data', chunk => { body += chunk; });
+          let tooBig = false;
+          req.on('data', chunk => {
+            body += chunk;
+            if (body.length > 200 * 1024 * 1024) {
+              tooBig = true;
+              req.destroy();
+            }
+          });
           req.on('end', async () => {
+            if (tooBig) return;
+            const answer = (code, obj) => {
+              res.writeHead(code, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(obj));
+            };
             try {
               const payload = JSON.parse(body);
-              if (req.url === '/watch') {
-                const { videoId, title, channel, duration, timestamp, isAd } = payload;
-                if (videoId) {
-                  const history = await this.loadHistoryData();
-                  if (!history.watches[videoId]) {
-                    history.watches[videoId] = [];
-                  }
-                  const videoWatches = history.watches[videoId];
-                  if (!videoWatches.includes(timestamp)) {
-                    videoWatches.push(timestamp);
-                    videoWatches.sort((a, b) => a - b);
-                  }
-                  
-                  const currentMeta = history.metadata[videoId];
-                  history.metadata[videoId] = {
-                    title,
-                    channel,
-                    duration: duration || (currentMeta ? currentMeta.duration : ''),
-                    lastWatched: currentMeta ? Math.max(currentMeta.lastWatched || 0, timestamp) : timestamp,
-                    isAd: isAd || (currentMeta ? currentMeta.isAd : false)
-                  };
-
-                  await this.saveHistoryData(history);
-                  this.refreshActiveViews();
-                  res.writeHead(200, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ success: true }));
-                  return;
-                }
-              } else if (req.url === '/sync') {
-                const { watches, metadata } = payload;
-                if (watches && metadata) {
-                  const history = await this.loadHistoryData();
-                  
-                  // Merge watches
-                  for (const videoId in watches) {
-                    if (!history.watches[videoId]) {
-                      history.watches[videoId] = [];
-                    }
-                    const existing = history.watches[videoId];
-                    const incoming = watches[videoId];
-                    incoming.forEach(ts => {
-                      if (!existing.includes(ts)) {
-                        existing.push(ts);
-                      }
-                    });
-                    existing.sort((a, b) => a - b);
-                  }
-
-                  // Merge metadata
-                  for (const videoId in metadata) {
-                    const existingMeta = history.metadata[videoId];
-                    const incomingMeta = metadata[videoId];
-                    if (!existingMeta || incomingMeta.lastWatched > (existingMeta.lastWatched || 0)) {
-                      history.metadata[videoId] = Object.assign({}, existingMeta || {}, incomingMeta);
-                    }
-                  }
-
-                  await this.saveHistoryData(history);
-                  this.refreshActiveViews();
-                  res.writeHead(200, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ success: true }));
-                  return;
-                }
+              if (req.url === '/watch' && payload && payload.videoId && typeof payload.timestamp === 'number') {
+                const { videoId, title, channel, duration, timestamp, isAd, isShort } = payload;
+                let added = 0;
+                await this.updateHistory((h) => {
+                  added = YTCore.mergeEvents(h, [{ videoId, title, channel, duration, timestamp, isAd, isShort }]).added;
+                });
+                this.refreshActiveViews();
+                return answer(200, { success: true, added });
               }
-
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ success: false, error: 'Invalid payload' }));
+              if (req.url === '/sync' && payload && payload.watches && payload.metadata) {
+                const events = [];
+                Object.keys(payload.watches).forEach((videoId) => {
+                  const m = payload.metadata[videoId] || {};
+                  const approx = new Set(m.approx || []);
+                  (payload.watches[videoId] || []).forEach((timestamp) => events.push({ videoId, timestamp, title: m.title, channel: m.channel, duration: m.duration, isAd: m.isAd, isShort: m.isShort, approx: approx.has(timestamp) }));
+                });
+                let added = 0;
+                await this.updateHistory((h) => {
+                  added = YTCore.mergeEvents(h, events).added;
+                });
+                this.refreshActiveViews();
+                return answer(200, { success: true, added });
+              }
+              answer(400, { success: false, error: 'Invalid payload' });
             } catch (err) {
-              res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ success: false, error: err.message }));
+              answer(500, { success: false, error: err.message });
             }
           });
           return;
@@ -3523,6 +4052,8 @@ class YtTrackerPlugin extends Plugin {
       }
     } catch (e) {
       console.error('Error loading history file:', e);
+      // Saving over a file we couldn't read would wipe it.
+      throw new Error(`Couldn't read ${path}: ${e.message}`);
     }
     return { watches: {}, metadata: {} };
   }
@@ -3530,18 +4061,40 @@ class YtTrackerPlugin extends Plugin {
   async saveHistoryData(data) {
     const { vault } = this.app;
     const path = this.settings.historyFilePath;
-    try {
-      const file = vault.getAbstractFileByPath(path);
-      if (file) {
-        await vault.modify(file, JSON.stringify(data, null, 2));
-      } else {
-        await vault.create(path, JSON.stringify(data, null, 2));
-      }
-      return true;
-    } catch (e) {
-      console.error('Error saving history file:', e);
-      return false;
+    const file = vault.getAbstractFileByPath(path);
+    if (file) {
+      await vault.modify(file, JSON.stringify(data, null, 2));
+    } else {
+      await vault.create(path, JSON.stringify(data, null, 2));
     }
+    return true;
+  }
+
+  /**
+   * Reads the history, lets `change` edit it, and saves it, one change at a time (the sync server
+   * and the dashboard both write; without this a late write lost an earlier one).
+   */
+  updateHistory(change) {
+    const run = (this._chain || Promise.resolve()).then(async () => {
+      const history = await this.loadHistoryData();
+      history.watches = history.watches || {};
+      history.metadata = history.metadata || {};
+      await change(history);
+      await this.saveHistoryData(history);
+      return history;
+    });
+    this._chain = run.catch(() => undefined);
+    return run;
+  }
+
+  /** A copy of the history next to it ("<file>.backup.json"). */
+  async writeBackup(data) {
+    const path = this.settings.historyFilePath.replace(/\.json$/i, '') + '.backup.json';
+    const { vault } = this.app;
+    const text = JSON.stringify(data);
+    const file = vault.getAbstractFileByPath(path);
+    if (file) await vault.modify(file, text);
+    else await vault.create(path, text);
   }
 }
 
