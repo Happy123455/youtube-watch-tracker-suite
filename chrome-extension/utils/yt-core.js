@@ -364,7 +364,7 @@
     const sl = n.shortsLockupViewModel;
     if (sl) {
       const ep = sl.onTap && sl.onTap.innertubeCommand && sl.onTap.innertubeCommand.reelWatchEndpoint;
-      const id = (ep && ep.videoId) || String(sl.entityId || '').replace(/^shorts-shelf-item-/, '');
+      const id = (ep && ep.videoId) || String(sl.entityId || '').replace(/^.*shelf-item-/, '');
       const title = (sl.overlayMetadata && textOf(sl.overlayMetadata.primaryText)) || String(sl.accessibilityText || '').split(',')[0];
       if (id && /^[A-Za-z0-9_-]{6,20}$/.test(id)) return { videoId: id, title: title || 'Unknown Video', channel: 'YouTube Shorts', isShort: true };
     }
