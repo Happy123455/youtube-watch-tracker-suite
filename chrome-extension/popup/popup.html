@@ -70,6 +70,22 @@
           <div id="ai-sync-log" class="ai-sync-log"></div>
         </section>
 
+        <!-- 🧯 Rhetoric firewall -->
+        <section class="section fw-section" id="fw-section">
+          <div class="ai-head">
+            <h2 class="section-title" style="margin: 0;">🧯 Rhetoric firewall</h2>
+            <span id="fw-shift" class="fw-shift-chip"></span>
+          </div>
+          <p class="fw-hint">Strips the delivery off what a video says and shows the bare argument. On YouTube, tap 🧯 on any video; or paste a link here. Gemini watches the video itself.</p>
+          <form id="fw-form" class="fw-form">
+            <input type="text" id="fw-url" placeholder="YouTube link" autocomplete="off" spellcheck="false">
+            <button type="submit" class="btn secondary" id="fw-go">🧯 Check</button>
+          </form>
+          <div id="fw-status"></div>
+          <ul id="fw-list" class="fw-list"></ul>
+          <div id="fw-view"></div>
+        </section>
+
         <!-- Heatmap Section -->
         <section class="section heatmap-section">
           <div class="heatmap-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -331,6 +347,9 @@
     </main>
   </div>
   <script src="../utils/yt-core.js"></script>
+  <script src="../utils/fw-core.js"></script>
+  <script src="../utils/fw-view.js"></script>
   <script src="popup.js" type="module"></script>
+  <script src="firewall.js" type="module"></script>
 </body>
 </html>

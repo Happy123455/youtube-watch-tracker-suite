@@ -3,6 +3,7 @@ import { recordWatch, getVideoHistory, clearVideoHistory, deleteWatch, getHistor
 import { runDailySync, getSettings, saveSettings, schedule, catchUpIfMissed, labelBacklog, ALARM, CATCH_UP } from './utils/daily.js';
 import { askJson } from './utils/ai.js';
 import { pushDigestToJournal } from './utils/journal.js';
+import { checkVideo, checking, deleteCheck, getChecks, setConviction } from './utils/firewall.js';
 
 // Listen for SPA navigation events on YouTube
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
@@ -88,6 +89,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ).then((r) => ({ model: r.model })),
         sendResponse,
       );
+
+    // ───── 🧯 Rhetoric firewall ─────
+    case 'firewallCheck':
+      return reply(checkVideo(message).then((check) => ({ check })), sendResponse);
+    case 'firewallGet':
+      return reply(getChecks().then((all) => ({ check: all[message.videoId] || null, checking: checking(message.videoId) })), sendResponse);
+    case 'firewallList':
+      return reply(getChecks().then((checks) => ({ checks })), sendResponse);
+    case 'firewallConviction':
+      return reply(setConviction(message.videoId, message.patch || {}).then((check) => ({ check })), sendResponse);
+    case 'firewallDelete':
+      return reply(deleteCheck(message.videoId), sendResponse);
 
     case 'closeActiveTab':
       chrome.action.setBadgeText({ text: '' });

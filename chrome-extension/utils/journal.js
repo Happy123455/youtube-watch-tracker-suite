@@ -9,7 +9,7 @@ import { getSettings } from './daily.js';
 const C = globalThis.YTCore;
 export const JOURNAL_MCP = 'http://127.0.0.1:39477/mcp';
 
-async function rpc(body, fetchImpl) {
+export async function rpc(body, fetchImpl) {
   const res = await fetchImpl(JOURNAL_MCP, {
     method: 'POST',
     signal: AbortSignal.timeout(8000),
