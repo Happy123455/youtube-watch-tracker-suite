@@ -1,5 +1,9 @@
 // service-worker.js
-import { recordWatch, getVideoHistory, clearVideoHistory, getHistory, batchImportHistory, clearAllHistory } from './utils/storage.js';
+import { recordWatch, getVideoHistory, clearVideoHistory, deleteWatch, getHistory, batchImportHistory, clearAllHistory, migrate, getLabels } from './utils/storage.js';
+import { runDailySync, getSettings, saveSettings, schedule, catchUpIfMissed, labelBacklog, ALARM, CATCH_UP } from './utils/daily.js';
+import { askJson } from './utils/ai.js';
+import { pushDigestToJournal } from './utils/journal.js';
+import { checkVideo, checking, deleteCheck, getChecks, setConviction } from './utils/firewall.js';
 
 // Listen for SPA navigation events on YouTube
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
@@ -15,77 +19,105 @@ chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
   }
 });
 
+/** Answers a message with the promise's result ({success, ...}) or its error. */
+function reply(promise, sendResponse) {
+  Promise.resolve(promise)
+    .then((result) => sendResponse({ success: true, ...(result || {}) }))
+    .catch((error) => sendResponse({ success: false, error: error && error.message ? error.message : String(error) }));
+  return true; // Keep the message channel open for the async answer.
+}
+
 // Handle runtime messages from content script or popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'recordWatch') {
-    const { videoId, title, channel, duration } = message;
-    recordWatch(videoId, title, channel, duration)
-      .then((result) => {
-        tryPushWatchToObsidian(videoId, title, channel, duration, result.timestamp);
-        sendResponse({ success: true, ...result });
-      })
-      .catch((error) => sendResponse({ success: false, error: error.message }));
-    return true; // Keep the message channel open for async response
-  }
-  
-  if (message.action === 'getVideoHistory') {
-    const { videoId } = message;
-    getVideoHistory(videoId)
-      .then((result) => sendResponse({ success: true, ...result }))
-      .catch((error) => sendResponse({ success: false, error: error.message }));
-    return true;
-  }
-  
-  if (message.action === 'getHistory') {
-    getHistory()
-      .then((result) => sendResponse({ success: true, ...result }))
-      .catch((error) => sendResponse({ success: false, error: error.message }));
-    return true;
-  }
-  
-  if (message.action === 'clearVideoHistory') {
-    const { videoId } = message;
-    clearVideoHistory(videoId)
-      .then(() => sendResponse({ success: true }))
-      .catch((error) => sendResponse({ success: false, error: error.message }));
-    return true;
-  }
+  // Only this extension's own pages and its content script talk to it.
+  if (sender.id !== chrome.runtime.id) return false;
 
-  if (message.action === 'batchImportHistory') {
-    const { events } = message;
-    batchImportHistory(events)
-      .then((result) => sendResponse({ success: true, ...result }))
-      .catch((error) => sendResponse({ success: false, error: error.message }));
-    return true;
-  }
+  switch (message.action) {
+    case 'recordWatch': {
+      const { videoId, title, channel, duration, isShort } = message;
+      return reply(
+        recordWatch(videoId, title, channel, duration, !!isShort).then((result) => {
+          if (result.added) tryPushWatchToObsidian(videoId, title, channel, duration, result.timestamp);
+          return result;
+        }),
+        sendResponse,
+      );
+    }
+    case 'getVideoHistory':
+      return reply(getVideoHistory(message.videoId), sendResponse);
+    case 'getHistory':
+      return reply(Promise.all([getHistory(), getLabels()]).then(([h, labels]) => ({ ...h, labels })), sendResponse);
+    case 'clearVideoHistory':
+      return reply(clearVideoHistory(message.videoId), sendResponse);
+    case 'deleteWatch':
+      return reply(deleteWatch(message.videoId, message.timestamp), sendResponse);
+    case 'batchImportHistory':
+      return reply(batchImportHistory(message.events), sendResponse);
+    case 'clearAllHistory':
+      return reply(clearAllHistory(), sendResponse);
 
-  if (message.action === 'clearAllHistory') {
-    clearAllHistory()
-      .then(() => sendResponse({ success: true }))
-      .catch((error) => sendResponse({ success: false, error: error.message }));
-    return true;
-  }
+    // ───── Daily sync + AI ─────
+    case 'runDailySync':
+      return reply(runDailySync({ reason: 'manual', days: message.days }).then(async (entry) => {
+        await pushDigestToJournal().catch(() => {});
+        return { entry };
+      }), sendResponse);
+    case 'getDailyState':
+      return reply(
+        chrome.storage.local
+          .get(['syncLog', 'digests', 'lastRunDay', 'lastCompleteDay', 'lastRepair', 'journalPush'])
+          .then(async (s) => ({ ...s, settings: { ...(await getSettings()), geminiKey: undefined, hasGeminiKey: !!(await getSettings()).geminiKey }, nextRun: (await chrome.alarms.get(ALARM))?.scheduledTime ?? null })),
+        sendResponse,
+      );
+    case 'saveDailySettings': {
+      const patch = { ...message.patch };
+      // An empty key field means "keep the saved key"; null removes it.
+      if (patch.geminiKey === '' || patch.geminiKey === undefined) delete patch.geminiKey;
+      if (patch.geminiKey === null) patch.geminiKey = '';
+      return reply(saveSettings(patch).then(async () => ({ nextRun: await schedule() })), sendResponse);
+    }
+    case 'labelBacklog':
+      return reply(getSettings().then((s) => labelBacklog(s, message.cap || 200)).then((labelled) => ({ labelled })), sendResponse);
+    case 'testAi':
+      return reply(
+        getSettings().then((s) =>
+          askJson(s, {
+            system: 'Reply with JSON {"ok": true}.',
+            prompt: 'Test',
+            schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] },
+          }),
+        ).then((r) => ({ model: r.model })),
+        sendResponse,
+      );
 
-  if (message.action === 'closeActiveTab') {
-    chrome.action.setBadgeText({ text: '' });
-    chrome.tabs.remove(sender.tab.id);
-    return false;
-  }
+    // ───── 🧯 Rhetoric firewall ─────
+    case 'firewallCheck':
+      return reply(checkVideo(message).then((check) => ({ check })), sendResponse);
+    case 'firewallGet':
+      return reply(getChecks().then((all) => ({ check: all[message.videoId] || null, checking: checking(message.videoId) })), sendResponse);
+    case 'firewallList':
+      return reply(getChecks().then((checks) => ({ checks })), sendResponse);
+    case 'firewallConviction':
+      return reply(setConviction(message.videoId, message.patch || {}).then((check) => ({ check })), sendResponse);
+    case 'firewallDelete':
+      return reply(deleteCheck(message.videoId), sendResponse);
 
-  if (message.action === 'updateSyncProgress') {
-    const { count } = message;
-    chrome.action.setBadgeText({ text: String(count) });
-    chrome.action.setBadgeBackgroundColor({ color: '#6366f1' });
-    
-    // Track active sync tab in session storage in case tab is removed
-    chrome.storage.session.set({ activeSyncTabId: sender.tab.id });
-    return false;
-  }
-
-  if (message.action === 'clearSyncBadge') {
-    chrome.action.setBadgeText({ text: '' });
-    chrome.storage.session.remove('activeSyncTabId');
-    return false;
+    case 'closeActiveTab':
+      chrome.action.setBadgeText({ text: '' });
+      if (sender.tab) chrome.tabs.remove(sender.tab.id);
+      return false;
+    case 'updateSyncProgress':
+      chrome.action.setBadgeText({ text: String(message.count) });
+      chrome.action.setBadgeBackgroundColor({ color: '#6366f1' });
+      // Track active sync tab in session storage in case tab is removed
+      if (sender.tab) chrome.storage.session.set({ activeSyncTabId: sender.tab.id });
+      return false;
+    case 'clearSyncBadge':
+      chrome.action.setBadgeText({ text: '' });
+      chrome.storage.session.remove('activeSyncTabId');
+      return false;
+    default:
+      return false;
   }
 });
 
@@ -96,6 +128,31 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
     chrome.action.setBadgeText({ text: '' });
     await chrome.storage.session.remove('activeSyncTabId');
   }
+});
+
+// ───── The daily run ─────
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== ALARM && alarm.name !== CATCH_UP) return;
+  runDailySync({ reason: alarm.name === ALARM ? 'daily' : 'catch-up' })
+    .then(() => pushDigestToJournal())
+    .catch((e) => console.warn('[WatchTree] Daily sync failed:', e));
+});
+
+async function startUp() {
+  await migrate().catch((e) => console.warn('[WatchTree] Repair failed:', e));
+  // The alarm survives restarts; set it again only when it's missing.
+  if (!(await chrome.alarms.get(ALARM))) await schedule();
+  await catchUpIfMissed();
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  setupRules();
+  void schedule().then(startUp);
+});
+chrome.runtime.onStartup.addListener(() => {
+  setupRules();
+  void startUp();
 });
 
 // Setup Declarative Net Request rules to modify Referer and Origin headers for YouTube embeds
@@ -133,23 +190,56 @@ async function setupRules() {
     }
   ];
 
+  // The daily sync's history requests come from this worker (no tab): YouTube's API expects them
+  // to come from its own site, like the page's own requests. Matching "no tab" needs a session rule.
+  const sessionRules = [
+    {
+      id: 3,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [
+          { header: 'Origin', operation: 'set', value: 'https://www.youtube.com' },
+          { header: 'Referer', operation: 'set', value: 'https://www.youtube.com/feed/history' }
+        ]
+      },
+      condition: {
+        urlFilter: '||www.youtube.com/youtubei/v1/browse',
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [-1],
+        initiatorDomains: [chrome.runtime.id]
+      }
+    },
+    {
+      // This Mac's Ollama and Dynamic Journal only take requests without a web page's Origin
+      // (that's how they keep websites out). Only this extension's own background requests.
+      id: 4,
+      priority: 1,
+      action: { type: 'modifyHeaders', requestHeaders: [{ header: 'Origin', operation: 'remove' }] },
+      condition: {
+        regexFilter: '^http://127\\.0\\.0\\.1:(11434|39477)/',
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [-1],
+        initiatorDomains: [chrome.runtime.id]
+      }
+    }
+  ];
+
   try {
     const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
-    const existingRuleIds = existingRules.map(r => r.id);
-    
     await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: existingRuleIds,
+      removeRuleIds: existingRules.map(r => r.id),
       addRules: rules
     });
-    console.log('Successfully configured declarativeNetRequest rules for YouTube embeds.');
+    const existingSession = await chrome.declarativeNetRequest.getSessionRules();
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: existingSession.map(r => r.id),
+      addRules: sessionRules
+    });
   } catch (error) {
     console.error('Failed to configure declarativeNetRequest rules:', error);
   }
 }
-
-// Call setupRules on service worker install and startup
-chrome.runtime.onInstalled.addListener(setupRules);
-chrome.runtime.onStartup.addListener(setupRules);
 
 // Call immediately on load to ensure rules are active
 setupRules();

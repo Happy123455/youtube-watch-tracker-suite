@@ -1,144 +1,154 @@
 // utils/storage.js
+// The watch history in chrome.storage.local: { watches: {videoId: [ms…]}, metadata: {videoId: {…}} }.
+// Every change goes through the service worker and one lock, so two tabs logging at once, a sync
+// and an import can't overwrite each other's writes (each reads, changes and writes the whole map).
+import './yt-core.js';
 
-/**
- * Retrieves the full watch history and metadata.
- * @returns {Promise<{watches: Object, metadata: Object}>}
- */
+const C = globalThis.YTCore;
+
+let chain = Promise.resolve();
+/** Runs `fn` after every change queued before it (one at a time), and returns what it returns. */
+export function withLock(fn) {
+  const run = chain.then(fn, fn);
+  chain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/** The full watch history and metadata. */
 export async function getHistory() {
   const result = await chrome.storage.local.get(['watches', 'metadata']);
-  return {
-    watches: result.watches || {},
-    metadata: result.metadata || {}
-  };
+  return { watches: result.watches || {}, metadata: result.metadata || {} };
 }
 
-/**
- * Records a watch event for a specific YouTube video.
- * @param {string} videoId - The YouTube video ID.
- * @param {string} title - The video title.
- * @param {string} channel - The channel name.
- * @param {string} duration - The video length/duration (optional).
- * @returns {Promise<{timestamp: number, watchesCount: number}>}
- */
-export async function recordWatch(videoId, title, channel, duration = '') {
-  const data = await getHistory();
-  const timestamp = Date.now();
-  
-  if (!data.watches[videoId]) {
-    data.watches[videoId] = [];
-  }
-  
-  // Prevent duplicate watch logs within the same 5-minute window
-  const videoWatches = data.watches[videoId];
-  const lastWatch = videoWatches[videoWatches.length - 1];
-  const FIVE_MINUTES = 5 * 60 * 1000;
-  
-  if (!lastWatch || (timestamp - lastWatch) > FIVE_MINUTES) {
-    videoWatches.push(timestamp);
-  }
-  
-  data.metadata[videoId] = {
-    title,
-    channel,
-    duration,
-    lastWatched: timestamp
-  };
-  
-  await chrome.storage.local.set({
-    watches: data.watches,
-    metadata: data.metadata
+async function save(data) {
+  await chrome.storage.local.set({ watches: data.watches, metadata: data.metadata });
+}
+
+/** Logs a watch happening now (live tracking). Within 5 minutes of the last log it's the same watch. */
+export function recordWatch(videoId, title, channel, duration = '', isShort = false) {
+  return withLock(async () => {
+    const data = await getHistory();
+    const timestamp = Date.now();
+    const { added, replaced } = C.mergeEvents(data, [{ videoId, title, channel, duration, timestamp, isShort, source: 'live' }]);
+    // Keep the newest duration (live tracking reads it from the player).
+    if (duration && data.metadata[videoId]) data.metadata[videoId].duration = duration;
+    await save(data);
+    return { timestamp, watchesCount: (data.watches[videoId] || []).length, added: added + replaced > 0 };
   });
-  
-  return {
-    timestamp,
-    watchesCount: videoWatches.length
-  };
 }
 
-/**
- * Retrieves watch timestamps and metadata for a specific video.
- * @param {string} videoId 
- * @returns {Promise<{timestamps: number[], metadata: Object|null}>}
- */
+/** Watch times and metadata of one video. */
 export async function getVideoHistory(videoId) {
   const data = await getHistory();
-  return {
-    timestamps: data.watches[videoId] || [],
-    metadata: data.metadata[videoId] || null
-  };
+  return { timestamps: data.watches[videoId] || [], metadata: data.metadata[videoId] || null };
 }
 
-/**
- * Clears the watch history for a specific video ID.
- * @param {string} videoId 
- */
-export async function clearVideoHistory(videoId) {
-  const data = await getHistory();
-  delete data.watches[videoId];
-  delete data.metadata[videoId];
-  await chrome.storage.local.set({
-    watches: data.watches,
-    metadata: data.metadata
+/** Forgets one video entirely. */
+export function clearVideoHistory(videoId) {
+  return withLock(async () => {
+    const data = await getHistory();
+    delete data.watches[videoId];
+    delete data.metadata[videoId];
+    await save(data);
+    const { labels = {} } = await chrome.storage.local.get('labels');
+    if (labels[videoId]) {
+      delete labels[videoId];
+      await chrome.storage.local.set({ labels });
+    }
   });
 }
 
-/**
- * Batches and merges a list of watch events into storage.
- * @param {Array<{videoId: string, title: string, channel: string, timestamp: number}>} events 
- * @returns {Promise<{addedCount: number}>}
- */
-export async function batchImportHistory(events) {
-  const data = await getHistory();
-  let addedCount = 0;
-
-  events.forEach(({ videoId, title, channel, timestamp, isAd }) => {
-    if (!videoId) return;
-
-    if (!data.watches[videoId]) {
-      data.watches[videoId] = [];
+/** Removes one watch of a video (the video goes when it was its last). */
+export function deleteWatch(videoId, timestamp) {
+  return withLock(async () => {
+    const data = await getHistory();
+    const list = (data.watches[videoId] || []).filter((t) => t !== timestamp);
+    if (list.length) {
+      data.watches[videoId] = list;
+      const meta = data.metadata[videoId];
+      if (meta && meta.approx) {
+        meta.approx = meta.approx.filter((t) => t !== timestamp);
+        if (!meta.approx.length) delete meta.approx;
+      }
+    } else {
+      delete data.watches[videoId];
+      delete data.metadata[videoId];
     }
-
-    const videoWatches = data.watches[videoId];
-    
-    // Check if the timestamp is already logged (avoid exact duplicates)
-    if (!videoWatches.includes(timestamp)) {
-      videoWatches.push(timestamp);
-      addedCount++;
-    }
-
-    // Update metadata if not present or if this is the newest watch
-    const currentMeta = data.metadata[videoId];
-    if (!currentMeta || timestamp > (currentMeta.lastWatched || 0)) {
-      data.metadata[videoId] = {
-        title,
-        channel,
-        duration: currentMeta ? currentMeta.duration : '',
-        lastWatched: currentMeta ? Math.max(currentMeta.lastWatched || 0, timestamp) : timestamp,
-        isAd: isAd || (currentMeta ? currentMeta.isAd : false)
-      };
-    }
+    await save(data);
+    return { remaining: list.length };
   });
-
-  // Sort timestamps chronologically for consistency
-  Object.keys(data.watches).forEach(videoId => {
-    data.watches[videoId].sort((a, b) => a - b);
-  });
-
-  await chrome.storage.local.set({
-    watches: data.watches,
-    metadata: data.metadata
-  });
-
-  return { addedCount };
 }
 
+/** Merges watch events (an import, the history page, a daily sync) without duplicates. */
+export function batchImportHistory(events) {
+  return withLock(async () => {
+    const data = await getHistory();
+    const { added, replaced } = C.mergeEvents(data, events || []);
+    if (added || replaced) await save(data);
+    return { addedCount: added, replacedCount: replaced };
+  });
+}
+
+/** Empties the history, keeping one copy in `backups` until the next reset. */
+export function clearAllHistory() {
+  return withLock(async () => {
+    const data = await getHistory();
+    await keepBackup('before-reset', data);
+    await chrome.storage.local.set({ watches: {}, metadata: {} });
+  });
+}
+
+/** Stores a copy of the history under `backups[name]` (replacing an older copy of that name). */
+export async function keepBackup(name, data) {
+  const { backups = {} } = await chrome.storage.local.get('backups');
+  backups[name] = { at: Date.now(), watches: data.watches, metadata: data.metadata };
+  await chrome.storage.local.set({ backups });
+}
+
+export const STORAGE_VERSION = 2;
+
 /**
- * Clears all history (resets watches and metadata to empty objects).
- * @returns {Promise<void>}
+ * Upgrades histories filled by older versions once: a backup copy first, then duplicate watches
+ * (re-synced history pages, imports on top of live logs) are folded together. Returns how many
+ * duplicates went, or null when already done.
  */
-export async function clearAllHistory() {
-  await chrome.storage.local.set({
-    watches: {},
-    metadata: {}
+export function migrate() {
+  return withLock(async () => {
+    const { storageVersion = 1 } = await chrome.storage.local.get('storageVersion');
+    if (storageVersion >= STORAGE_VERSION) return null;
+    const data = await getHistory();
+    if (Object.keys(data.watches).length) {
+      await keepBackup('before-v2-repair', JSON.parse(JSON.stringify(data)));
+      const removed = C.repairDuplicates(data);
+      // A Short logged live was saved under the channel "YouTube Shorts": remember it's a Short.
+      for (const id of Object.keys(data.metadata)) {
+        const m = data.metadata[id];
+        if (m && (m.channel === 'YouTube Shorts' || m.channel === 'Shorts')) m.isShort = true;
+      }
+      await save(data);
+      await chrome.storage.local.set({ storageVersion: STORAGE_VERSION, lastRepair: { at: Date.now(), removed } });
+      return removed;
+    }
+    await chrome.storage.local.set({ storageVersion: STORAGE_VERSION });
+    return 0;
+  });
+}
+
+// ───── AI labels: {videoId: {category, topics, why, at, by}} ─────
+
+export async function getLabels() {
+  const { labels = {} } = await chrome.storage.local.get('labels');
+  return labels;
+}
+
+export function saveLabels(patch) {
+  return withLock(async () => {
+    const labels = await getLabels();
+    Object.assign(labels, patch);
+    await chrome.storage.local.set({ labels });
+    return labels;
   });
 }
